@@ -1,3 +1,11 @@
+//
+//  main.cpp
+//  atlasxcode
+//
+//  Created by holland schutte on 11/11/16.
+//  Copyright © 2016 holland schutte. All rights reserved.
+//
+
 #include <stdio.h>
 #include <dirent.h>
 #include <vector>
@@ -9,7 +17,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 
-#define SHADER(str) "#version 330 core\n"#str"\n"
+#define SHADER(str) "#version 410 core\n"#str"\n"
 
 extern "C" {
     
@@ -50,12 +58,12 @@ extern "C" {
 extern "C" {
     
     static const char* GLSL_VERTEX_SHADER = SHADER(
-        layout(location = 0) in vec2 position;
+        layout(location = 0) in vec3 position;
         layout(location = 1) in vec4 color;
         
         out vec4 vary_Color;
         void main(void) {
-            gl_Position = vec4(position, 0.0, 1.0);
+            gl_Position = vec4(position, 1.0);
             vary_Color = color;
         }
     );
@@ -148,19 +156,21 @@ extern "C" {
         return 0;
     }
     
-    struct vertex_t
-    {
-        GLfloat position[2];
+    struct vertex_t {
+        GLfloat position[3];
+        GLfloat st[2];
         uint8_t color[4];
     };
 }
 
 int main(int argc, const char * argv[])
 {
+    load_atlas();
+    
     glfwInit();
     
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
@@ -186,16 +196,17 @@ int main(int argc, const char * argv[])
     GL_H( glBindBuffer(GL_ARRAY_BUFFER, vbo) );
     
     struct vertex_t vbo_data[] = {
-        { { -1.0f, 0.0f }, { 255, 0, 0, 255 } },
-        { { 1.0f, 0.0f },  { 0, 255, 0, 255 } },
-        { { 0.0f, 1.0f },  { 0, 0, 255, 255 } }
+        { { -1.0f, -1.0f, 0.0f }, { 0.0f, 0.0f }, { 255, 0, 0, 255 } },
+        { { 1.0f, -1.0f, 0.0f }, { 1.0f, 0.0f }, { 0, 255, 0, 255 } },
+        { { -1.0f, 1.0f, 0.0f }, { 0.0f, 1.0f }, { 0, 0, 255, 255 } },
+        { { 1.0f, 1.0f, 0.0f }, { 1.0f, 1.0f }, { 255, 0, 255, 255 } }
     };
     
     GL_H( glBufferData(GL_ARRAY_BUFFER, sizeof(vbo_data), &vbo_data[0],
                        GL_STATIC_DRAW) );
     
     GL_H( glEnableVertexAttribArray(0) );
-    GL_H( glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(vbo_data[0]),
+    GL_H( glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(vbo_data[0]),
                                 (GLvoid*) offsetof(vertex_t, position)) );
     
     GL_H( glEnableVertexAttribArray(1) );
@@ -210,7 +221,7 @@ int main(int argc, const char * argv[])
         
         GL_H( glClear(GL_COLOR_BUFFER_BIT) );
         
-        GL_H( glDrawArrays(GL_TRIANGLES, 0, 3) );
+        GL_H( glDrawArrays(GL_TRIANGLE_STRIP, 0, 4) );
         
         glfwSwapBuffers(window);
         glfwPollEvents();
