@@ -161,20 +161,6 @@ extern "C" {
         GLfloat position[2];
         uint8_t color[4];
     };
-    
-    struct image_t {
-        
-    };
-    
-    static void load_atlas(void)
-    {
-        DIR* dir = opendir("./textures/gothic_block");
-        struct dirent* ent = NULL;
-        
-        while (!!(ent = readdir(dir))) {
-            
-        }
-    }
 }
 
 int main(int argc, const char * argv[])
