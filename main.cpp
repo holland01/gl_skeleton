@@ -1,11 +1,3 @@
-//
-//  main.cpp
-//  atlasxcode
-//
-//  Created by holland schutte on 11/11/16.
-//  Copyright © 2016 holland schutte. All rights reserved.
-//
-
 #include <stdio.h>
 #include <dirent.h>
 #include <vector>
