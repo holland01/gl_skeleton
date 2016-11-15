@@ -22,10 +22,15 @@
 #include <dirent.h>
 #include <vector>
 #include <string>
+#include <algorithm>
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.c"
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/matrix_access.hpp>
+#include <glm/gtc/type_ptr.hpp>
 #include <assert.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -41,8 +46,8 @@ extern "C" {
         GLenum err = glGetError();
         
         if (err != GL_NO_ERROR) {
-            printf("in %s@%i [%s]: %s\n", func, line, expr,
-                   (const char* )glewGetString(err));
+            printf("GL ERROR (%x) in %s@%i [%s]: %s\n", err, func, line, expr,
+                   (const char* )glewGetErrorString(err));
             
             g_running = false;
         }
@@ -75,11 +80,14 @@ extern "C" {
         layout(location = 1) in vec2 st;
         layout(location = 2) in vec4 color;
                         
+        uniform mat4 modelView;
+        uniform mat4 projection;                                           
+                                                   
         out vec4 vary_Color;
         out vec2 vary_St;
                             
         void main(void) {
-            gl_Position = vec4(position, 1.0);
+            gl_Position = projection * modelView * vec4(position, 1.0);
             vary_Color = color;
             vary_St = st;
         }
@@ -206,16 +214,48 @@ extern "C" {
         std::vector<uint16_t> coords_y;
         std::vector<std::vector<uint8_t>> buffer_table;
         std::vector<std::string> filenames;
+        
+        void bind(void) const
+        {
+            GL_H( glBindTexture(GL_TEXTURE_2D, atlas_tex_handle) );
+        }
+        
+        void bind_image(void) const
+        {
+            GL_H( glBindTexture(GL_TEXTURE_2D, img_tex_handle) );
+        }
+        
+        void release(void) const
+        {
+            GL_H( glBindTexture(GL_TEXTURE_2D, 0) );
+        }
+        
+        void fill_image(size_t x, size_t y, size_t image) const
+        {
+            GL_H( glTexSubImage2D(GL_TEXTURE_2D,
+                                  0,
+                                  (GLsizei) x,
+                                  (GLsizei) y,
+                                  dims_x[image],
+                                  dims_y[image],
+                                  GL_RGBA,
+                                  GL_UNSIGNED_BYTE,
+                                  &buffer_table[image][0]) );
+        }
+        
+        bool test_image_bounds_x(size_t x, size_t image) const { return  (x + dims_x[image]) < atlas_width; }
+        
+        bool test_image_bounds_y(size_t y, size_t image) const { return (y + dims_y[image]) < atlas_height; }
     };
     
-    class grid_t
+    class gridset_t
     {
         uint16_t width;
         uint16_t height;
         std::vector<uint8_t> region;
         
     public: 
-        grid_t(size_t width_, size_t height_)
+        gridset_t(size_t width_, size_t height_)
             :   width((uint16_t) (width_ & 0xFFFF)),
                 height((uint16_t) (height_ & 0xFFFF)),
                 region((width_ * height_) >> 3, 0)
@@ -259,17 +299,35 @@ extern "C" {
         }
     };
     
-    static void place_images(atlas_t& atlas)
+    static std::vector<uint16_t> sort_images(const atlas_t& atlas)
     {
+        std::vector<uint16_t> sorted(atlas.num_images);
         
-        GL_H( glBindTexture(GL_TEXTURE_2D, atlas.atlas_tex_handle) );
+        for (size_t i = 0; i < atlas.num_images; ++i) {
+            sorted[i] = i;
+        }
         
+        std::sort(sorted.begin(), sorted.end(), [&atlas](uint16_t a, 
+                                                         uint16_t b) -> bool {
+            if (atlas.dims_x[a] == atlas.dims_x[b]) {
+                return atlas.dims_y[a] < atlas.dims_y[b];
+            }
+            
+            return atlas.dims_x[a] < atlas.dims_x[b];
+        });
+        
+        return sorted;
+    }
+    
+    static void place_images0(atlas_t& atlas)
+    {
         size_t i_x = 0;
         size_t i_y = 0;
         size_t high_y = 0;
         
-        grid_t grid(atlas.atlas_width, atlas.atlas_height);
+        gridset_t grid(atlas.atlas_width, atlas.atlas_height);
         
+        atlas.bind();
         for (size_t image = 0; image < atlas.num_images; ++image) {
             if (grid.subregion_free(i_x, 
                                     i_y, 
@@ -279,15 +337,7 @@ extern "C" {
                 if ((size_t) atlas.dims_y[image] > high_y)
                     high_y = (size_t) atlas.dims_y[image];
                 
-                GL_H( glTexSubImage2D(GL_TEXTURE_2D,
-                                      0,
-                                      (GLsizei) i_x,
-                                      (GLsizei) i_y,
-                                      atlas.dims_x[image],
-                                      atlas.dims_y[image],
-                                      GL_RGBA,
-                                      GL_UNSIGNED_BYTE,
-                                      &atlas.buffer_table[image][0]) );
+                atlas.fill_image(i_x, i_y, image);
                 
                 grid.fill_subregion(i_x, 
                                     i_y,
@@ -303,14 +353,91 @@ extern "C" {
                 }
             }
         }
+        atlas.release();
+    }
+    
+    static void place_images1(const atlas_t& atlas) 
+    {
+        std::vector<uint16_t> sorted = sort_images(atlas);
         
-        GL_H( glBindTexture(GL_TEXTURE_2D, 0) );
+        size_t last_width = (size_t) atlas.dims_x[sorted[0]];
+        
+        size_t i_x = 0;
+        size_t i_y = 0;
+        
+        atlas.bind();
+        
+        size_t images_used = 0;
+        
+        // TODO: Since the base structure is laid out with the following loop,
+        // the next step is to eliminate the most dead space and shove 
+        // the atlas as far to the direction with the most dead space as 
+        // possible: this will allow for a more open space to exist.
+        
+        // If the dead space which is the most (in either height or width 
+        // or total area - which takes priority out of these three measurements
+        // still needs to be determined) "dead" or unused contains any images,
+        // then try to disperse those images in other empty areas. 
+        
+        // The dead space should first be looked at in terms of just columns 
+        // and rows before moving onto anything more complicated. 
+        
+        // So, for example, if there's a column with like 2 images and 
+        // no other column has less than those two images, then 
+        // the next thing to do would be to see if there are any
+        // other columns with just two images: the one 
+        // with the most width would be the kicker, which you could then 
+        // remove the images from and squish the adjacent columns against 
+        // each other with, thus closing the dead area.
+        
+        // The images which had been fetched could then see if they can be 
+        // combined, maybe, with the other column containing only two images.
+        // Since these images will have larger widths (the ones which were removed)
+        // a rotation could be applied to these images to see if they'll fit better
+        // (though this isn't guaranteed it will work, since their height when used 
+        // as width may still extend into an adjacent column).
+        
+        // Ultimately this may end up introducing a large number of tests until every image
+        // is properly placed into the atlas. There may be some more implicit
+        // methods that can be used, though, to improve performance.
+        
+        // If there's a chunk of unused area which _can't_ hold a given image 
+        // without intersecting another image, try rotating it by 90 degrees
+        // and then retesting before moving on.
+        
+        
+        
+        for (size_t image = 0; image < sorted.size(); ++image) {
+            if (last_width != atlas.dims_x[sorted[image]]) {
+                i_y = 0;
+                i_x += last_width;
+                last_width = atlas.dims_x[sorted[image]];
+            }
+            
+            if (!atlas.test_image_bounds_y(i_y, sorted[image])) {
+                i_y = 0;
+                i_x += last_width;
+            }
+            
+            if (!atlas.test_image_bounds_x(i_x, sorted[image]))
+                break;
+            
+            atlas.fill_image(i_x, i_y, sorted[image]);
+            images_used++;
+            
+            if (last_width == atlas.dims_x[sorted[image]]) {
+                i_y += atlas.dims_y[sorted[image]];
+            }
+        }
+        atlas.release();
+        
+        logf("images used: %llu/%lu", images_used, atlas.num_images);
     }
     
     static void alloc_blank_texture(size_t width, size_t height,
-                                    uint8_t clear_val)
+                                    uint32_t clear_val)
     {
-        std::vector<uint8_t> blank(width * height * 4, clear_val);
+        std::vector<uint32_t> blank(width * height, clear_val);
         GL_H( glTexImage2D(GL_TEXTURE_2D,
                            0,
                            GL_RGBA8,
@@ -332,18 +459,9 @@ extern "C" {
         // the remaining area will
         // still be occupied by its texels,
         // so we clear the entire buffer first
-        alloc_blank_texture(atlas.max_width, atlas.max_height, 255);
+        alloc_blank_texture(atlas.max_width, atlas.max_height, 0xFFFFFFFF);
         
-        GL_H( glTexSubImage2D(GL_TEXTURE_2D,
-                              0,
-                              0,
-                              0,
-                              atlas.dims_x[atlas.curr_image],
-                              atlas.dims_y[atlas.curr_image],
-                              GL_RGBA,
-                              GL_UNSIGNED_BYTE,
-                              &atlas.buffer_table[atlas.curr_image][0]) );
-        
+        atlas.fill_image(0, 0, atlas.curr_image);
     }
     
     static void convert_rgb_to_rgba(uint8_t* dest, const uint8_t* src, size_t dim_x,
@@ -462,7 +580,8 @@ extern "C" {
         closedir(dir);
         
         GL_H( glGenTextures(1, &atlas.img_tex_handle) );
-        GL_H( glBindTexture(GL_TEXTURE_2D, atlas.img_tex_handle) );
+        
+        atlas.bind_image();
         
         GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) );
         GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) );
@@ -472,18 +591,19 @@ extern "C" {
         upload_curr_image(atlas);
         
         GL_H( glGenTextures(1, &atlas.atlas_tex_handle) );
-        GL_H( glBindTexture(GL_TEXTURE_2D, atlas.atlas_tex_handle) );
+        
+        atlas.bind();
         
         GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) );
         GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) );
         GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE) );
         GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE) );
 
-        alloc_blank_texture(atlas.atlas_width, atlas.atlas_height, 0);
+        alloc_blank_texture(atlas.atlas_width, atlas.atlas_height, 0xFF0000FF);
         
-        GL_H( glBindTexture(GL_TEXTURE_2D, 0) );
+        atlas.release();
         
-        place_images(atlas);
+        place_images1(atlas);
         
         logf("Total Images: %lu\nArea Accum: %lu",
              atlas.num_images, area_accum);
@@ -491,6 +611,58 @@ extern "C" {
         return atlas;
     }
 }
+
+class camera_t
+{
+    uint16_t screen_width, screen_height;
+    
+    glm::vec3 origin;
+    glm::mat4 view;
+    glm::mat4 projection;
+    
+public:
+    camera_t(uint16_t screen_w, uint16_t screen_h)
+        :   screen_width(screen_w), screen_height(screen_h),
+            origin(0.0f),
+            view(1.0f), projection(1.0f)
+    {}
+    
+    void perspective(float fovy, float znear, float zfar)
+    {
+        projection = glm::perspective(glm::radians(fovy), 
+                                      ((float) screen_width) / ((float) screen_height),
+                                      znear, zfar);
+    }
+    
+    void strafe(float t) 
+    {
+        origin.x += t;
+    }
+    
+    void raise(float t)
+    {
+        origin.y += t;
+    }
+    
+    void walk(float t)
+    {
+        origin.z -= t;
+    }
+    
+    glm::mat4 model_to_view(void)
+    {
+        view[3] = glm::vec4(-origin, 1.0f);
+        return view;
+    }
+    
+    const glm::mat4& view_to_clip(void) const { return projection; }
+    
+    uint16_t view_width(void) const { return screen_width; }
+    
+    uint16_t view_height(void) const { return screen_height; }
+};
+
+#define KEY_PRESS(key) (glfwGetKey(window, (key)) == GLFW_PRESS)
 
 int main(int argc, const char * argv[])
 {
@@ -502,8 +674,12 @@ int main(int argc, const char * argv[])
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
     glfwWindowHint(GLFW_STICKY_KEYS, GLFW_TRUE);
-    
-    GLFWwindow* window = glfwCreateWindow(640, 480, "OpenGL", nullptr, nullptr);
+ 
+    camera_t camera(640, 480);
+    GLFWwindow* window = glfwCreateWindow(camera.view_width(), 
+                                          camera.view_height(), 
+                                          "OpenGL", 
+                                          nullptr, nullptr);
     
     glfwMakeContextCurrent(window);
     
@@ -556,32 +732,49 @@ int main(int argc, const char * argv[])
     
     bool atlas_view = false;
     
-    while (glfwGetKey(window, GLFW_KEY_ESCAPE) != GLFW_PRESS
+    camera.perspective(40.0f, 0.01f, 10.0f);
+    camera.walk(-3.0f);
+    
+    const float CAMERA_STEP = 0.05f;
+    
+    while (!KEY_PRESS(GLFW_KEY_ESCAPE)
            && !glfwWindowShouldClose(window)
            && g_running) {
         
-        GL_H( glClear(GL_COLOR_BUFFER_BIT) );
+        GL_H( glUniformMatrix4fv(glGetUniformLocation(program, "modelView"),
+                                 1, GL_FALSE, glm::value_ptr(camera.model_to_view())) );
+             
+        GL_H( glUniformMatrix4fv(glGetUniformLocation(program, "projection"),
+                                 1, GL_FALSE, glm::value_ptr(camera.view_to_clip())) );
         
+        GL_H( glClear(GL_COLOR_BUFFER_BIT) );
         GL_H( glDrawArrays(GL_TRIANGLE_STRIP, 0, 4) );
         
         glfwSwapBuffers(window);
         glfwPollEvents();
         
-        if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS)
+        if (KEY_PRESS(GLFW_KEY_UP))
             atlas_view = !atlas_view;
         
+        if (KEY_PRESS(GLFW_KEY_W)) camera.walk(CAMERA_STEP);
+        if (KEY_PRESS(GLFW_KEY_S)) camera.walk(-CAMERA_STEP);
+        if (KEY_PRESS(GLFW_KEY_A)) camera.strafe(-CAMERA_STEP);
+        if (KEY_PRESS(GLFW_KEY_D)) camera.strafe(CAMERA_STEP);
+        if (KEY_PRESS(GLFW_KEY_SPACE)) camera.raise(CAMERA_STEP);
+        if (KEY_PRESS(GLFW_KEY_LEFT_SHIFT)) camera.raise(-CAMERA_STEP);
+        
         if (atlas_view) {
-            GL_H( glBindTexture(GL_TEXTURE_2D, atlas.atlas_tex_handle) );
+            atlas.bind();
         } else {
-            GL_H( glBindTexture(GL_TEXTURE_2D, atlas.img_tex_handle));
+            atlas.bind_image();
             
-            if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) {
+            if (KEY_PRESS(GLFW_KEY_RIGHT)) {
                 atlas.curr_image++;
                 upload_curr_image(atlas);
                 glfwSetWindowTitle(window, atlas.filenames[atlas.curr_image].c_str());
             }
             
-            if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS) {
+            if (KEY_PRESS(GLFW_KEY_LEFT)) {
                 atlas.curr_image--;
                 upload_curr_image(atlas);
                 glfwSetWindowTitle(window, atlas.filenames[atlas.curr_image].c_str());
