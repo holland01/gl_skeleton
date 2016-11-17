@@ -18,6 +18,25 @@
  ░░░░░░░░░█░░░░░░░░░░░░█░░░░
  */
 
+// NOTE:
+// It's likely that initially several iterations of the find min, clear min, replace min cycle will be used.
+// You'll need to find a good heuristic for when this can "stop". It could be as soon as there's no possible 
+// means of appending a cleared column unto another one; at this point, a new stage would be initiated and something
+// more granular would be attempted.
+
+// TODO: 
+// remember that as of now the initial placement loop no longer early's out as soon as it finds that the 
+// i_x iterator + the current image's width exceeds the bounds of the atlas. In this case,
+// it simply just maintains the "used = false" status. Give this a second look
+// and make sure that not earlying out won't cause any problems with the initial placement.
+
+// TODO:
+// finish up the replace min stage, which is supposed to find a suitable location
+// for the column after consolodation: this initially will involve looking for a
+// column it can append itself unto - likely one with the most width, least height, at first: the smallest
+// width would likely provide little remaining room for other images. The smallest width could be a good
+// fallback though.
+
 #include <stdio.h>
 #include <dirent.h>
 
@@ -26,7 +45,7 @@
 #include <algorithm>
 #include <queue>
 #include <sstream>
-#include <set>
+#include <array>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.c"
@@ -220,10 +239,22 @@ fail:
 // * place_images1 - performs the major processing/generation of the atlas itself.
 //------------------------------------------------------------------------------------
 
-// bit flag which tells whether or not
-// a particular image is rotated by 90 degs
+// Bit flag which tells whether or not
+// a particular image is rotated by 90 degs.
+// we can store about 2 bits of information
+// in each coord, since the max atlas dim size 
+// worth going is 8192. So, we can use about 
+// four flags total.
+
+// Technically speaking, since atlas 
+// dims are always powers of two only,
+// we'd have 15 bits free, with only
+// one bit being used for the size.
+
+// There's no need for that at this time,
+// though.
 enum {
-    COORDS_ROT_90 = 1 << 15
+    ATLAS_COORDS_ROT_90 = 1 << 15
 };
 
 struct atlas_t {
@@ -240,10 +271,15 @@ struct atlas_t {
     GLuint atlas_tex_handle = 0;
     uint32_t num_images = 0;
     
+    // these two are used during genartion
     std::vector<uint16_t> dims_x;
     std::vector<uint16_t> dims_y;
+    
+    // these two aren't used during generation,
+    // but need to be written to afterward
     std::vector<uint16_t> coords_x;
     std::vector<uint16_t> coords_y;
+    
     std::vector<std::vector<uint8_t>> buffer_table;
     std::vector<std::string> filenames;
     
@@ -310,6 +346,30 @@ struct atlas_t {
     bool test_image_bounds_x(size_t x, size_t image) const { return  (x + dims_x[image]) < atlas_width; }
     
     bool test_image_bounds_y(size_t y, size_t image) const { return (y + dims_y[image]) < atlas_height; }
+
+    void free_texture_data(void) 
+    {
+        if (!!img_tex_handle || !!atlas_tex_handle) {
+            GLint curr_bound_tex;
+            GL_H( glGetIntegerv(GL_TEXTURE_BINDING_2D, &curr_bound_tex) );
+            
+            if (curr_bound_tex == img_tex_handle 
+                || curr_bound_tex == atlas_tex_handle) {
+                GL_H( glBindTexture(GL_TEXTURE_2D, 0) );
+            }
+            
+            GL_H( glDeleteTextures(1, &img_tex_handle) );
+            GL_H( glDeleteTextures(1, &atlas_tex_handle) );
+        
+            img_tex_handle = 0;
+            atlas_tex_handle = 0;
+        }
+    }
+    
+    ~atlas_t(void) 
+    {
+        free_texture_data();
+    }
 };
 
 //------------------------------------------------------------------------------------
@@ -317,11 +377,34 @@ struct atlas_t {
 // a -> start origin
 // b -> end origin
 struct subregion_t {
-    bool used = false;
+    enum {
+        SUBREGION_USED = 1 << 0,
+        SUBREGION_MOVING = 1 << 1
+    };
+    
+    uint16_t flags = 0;
     uint16_t a_x = 0;
     uint16_t a_y = 0;  
     uint16_t b_x = 0;
     uint16_t b_y = 0;
+    
+    template <uint16_t bitflag> 
+    void set_bitflag(bool flag)
+    {
+        if (flag) {
+            flags |= bitflag;
+        } else {
+            flags &= ~bitflag; 
+        }
+    }
+    
+    bool used(void) const { return !!(flags & SUBREGION_USED); }
+    
+    bool moving(void) const { return !!(flags & SUBREGION_MOVING); }
+    
+    void set_used(bool flag) { set_bitflag<SUBREGION_USED>(flag); }
+    
+    void set_moving(bool flag) { set_bitflag<SUBREGION_MOVING>(flag); }
 };
 
 class gridset_t 
@@ -458,56 +541,28 @@ static void place_images0(atlas_t& atlas)
     atlas.release();
 }
 
-
 //------------------------------------------------------------------------------------
-// TODO: Since the base structure is laid out with the following loop,
-// the next step is to eliminate the most dead space and shove 
-// the atlas as far to the direction with the most dead space as 
-// possible: this will allow for a more open space to exist.
-
-// If the dead space which is the most (in either height or width 
-// or total area - which takes priority out of these three measurements
-// still needs to be determined) "dead" or unused contains any images,
-// then try to disperse those images in other empty areas. 
-
-// The dead space should first be looked at in terms of just columns 
-// and rows before moving onto anything more complicated. 
-
-// So, for example, if there's a column with like 2 images and 
-// no other column has less than those two images, then 
-// the next thing to do would be to see if there are any
-// other columns with just two images: the one 
-// with the most width would be the kicker, which you could then 
-// remove the images from and squish the adjacent columns against 
-// each other with, thus closing the dead area.
-
-// The images which had been fetched could then see if they can be 
-// combined, maybe, with the other column containing only two images.
-// Since these images will have larger widths (the ones which were removed)
-// a rotation could be applied to these images to see if they'll fit better
-// (though this isn't guaranteed it will work, since their height when used 
-// as width may still extend into an adjacent column).
-
-// Ultimately this may end up introducing a large number of tests until every image
-// is properly placed into the atlas. There may be some more implicit
-// methods that can be used, though, to improve performance.
-
-// If there's a chunk of unused area which _can't_ hold a given image 
-// without intersecting another image, try rotating it by 90 degrees
-// and then retesting before moving on.
-
-
+// gen_layout: the actual algorithm for generating the atlas positions.
 //------------------------------------------------------------------------------------
-// place_images1: the actual algorithm for generating the atlas positions.
-//------------------------------------------------------------------------------------
-class place_images1 
+
+
+// flags for choosing optional modifications to make - this is more or less for testing purposes.
+enum {
+    GEN_LAYOUT_CLEAR_MIN_WIDTH_COLUMN = 1 << 0,
+    GEN_LAYOUT_CONSOLODATE_COLUMNS_HORIZONTALLY = 1 << 1,
+    GEN_LAYOUT_REPLACE_MIN_WIDTH_COLUMN = 1 << 2,
+    
+    GEN_LAYOUT_ALL_STAGES = GEN_LAYOUT_CLEAR_MIN_WIDTH_COLUMN 
+        | GEN_LAYOUT_CONSOLODATE_COLUMNS_HORIZONTALLY
+        | GEN_LAYOUT_REPLACE_MIN_WIDTH_COLUMN
+};
+
+class gen_layout 
 {
     uint16_t clear_index;
     
     std::vector<uint16_t> sorted;
     std::vector<subregion_t> subregions;
-    
-    gridset_t grid;
     
     const atlas_t& atlas;
     
@@ -517,7 +572,7 @@ class place_images1
     // take the remaining heights to be placeed within the group
     // and generate a separate adjacent column with them. 
     // We also keep track of our placement using the "gridset"
-    void first_phase(void)
+    void place_sorted_columns(void)
     {
         size_t last_width = (size_t) atlas.dims_x[sorted[0]];
         size_t images_used = 0;
@@ -536,16 +591,16 @@ class place_images1
                 i_x += last_width;
             }
             
-            if (!atlas.test_image_bounds_x(i_x, sorted_img_index))
-                break;
-            
             subregions[sorted_img_index].a_x = (uint16_t) i_x;
             subregions[sorted_img_index].a_y = (uint16_t) i_y;
-            subregions[sorted_img_index].b_x = (uint16_t) i_x + atlas.dims_x[sorted_img_index];
-            subregions[sorted_img_index].b_y = (uint16_t) i_y + atlas.dims_y[sorted_img_index]; 
+            subregions[sorted_img_index].b_x = 
+                (uint16_t) i_x + atlas.dims_x[sorted_img_index];
+            subregions[sorted_img_index].b_y = 
+                (uint16_t) i_y + atlas.dims_y[sorted_img_index]; 
             
-            grid.fill_subregion(subregions[sorted_img_index]);
-            subregions[sorted_img_index].used = true;
+            if (atlas.test_image_bounds_x(i_x, sorted_img_index)) {
+                subregions[sorted_img_index].set_used(true);
+            }
             
             images_used++;
             
@@ -557,15 +612,12 @@ class place_images1
         logf("images used: %llu/%lu", images_used, atlas.num_images);
     }
     
-    // Find the column with the least amount of images.
-    // TODO: find a good mechanism for dealing with duplicate
-    // counts. Maybe prioritize based on width.
-    void second_phase(void)
+    uint16_t find_min_count_column(void) const
     {
         // sorted[0] is guaranteed to be in the atlas
         // given the nature of insertion, but just in case 
         // the insert algol changes put an assert here
-        assert(subregions[sorted[0]].used 
+        assert(subregions[sorted[0]].used() 
                && "Critical component to this loop is that the" 
                "first image in the sorted index buffer is used");
         
@@ -574,9 +626,9 @@ class place_images1
         
         uint16_t img_counter = 1;
         uint16_t last_x = subregions[sorted[0]].a_x;
-                    
+        
         for (size_t i = 1; i < sorted.size(); ++i) {
-            if (!subregions[sorted[i]].used)
+            if (!subregions[sorted[i]].used())
                 continue;
             
             if (last_x == subregions[sorted[i]].a_x) {
@@ -586,22 +638,31 @@ class place_images1
                     min_img_count = img_counter;
                     min_img_count_index = sorted[i - 1];
                     last_x = subregions[sorted[i]].a_x;
-                    img_counter = 0;
+                    img_counter = 1;
                 }
             }
         }
         
         assert(min_img_count);
         
+        return min_img_count_index;
+    }
+    
+    // Find the column with the least amount of images.
+    // TODO: find a good mechanism for dealing with duplicate
+    // counts. Maybe prioritize based on width.
+    void clear_min_width_column(void)
+    {
+        clear_index = find_min_count_column();
+        
         // clear out every image in the target column
         for (uint16_t sorted_img_index: sorted) {
-            if (subregions[sorted_img_index].a_x == subregions[min_img_count_index].a_x) {
-                subregions[sorted_img_index].used = false;
-                grid.clear_subregion(subregions[sorted_img_index]);
+            if (subregions[sorted_img_index].a_x == 
+                    subregions[clear_index].a_x) {
+                subregions[sorted_img_index].set_used(false);
+                subregions[sorted_img_index].set_moving(true);
             }
         }
-        
-        clear_index = min_img_count_index;
     }
     
     struct shift_region_t {
@@ -609,7 +670,9 @@ class place_images1
         std::queue<uint16_t> indices;
     };
     
-    void append_shift_list(std::vector<shift_region_t>& toshift, uint16_t coord, uint16_t index)
+    void append_shift_list(std::vector<shift_region_t>& toshift, 
+                           uint16_t coord, 
+                           uint16_t index)
     {
         bool found = false;
         
@@ -631,12 +694,12 @@ class place_images1
     
     // Shift all subregions whose x coordinates are > the cleared subregion's
     // x coordinate towards the cleared subregion's origin
-    void third_phase(void)
+    void consolodate_columns_horizontally(void)
     {
         std::vector<shift_region_t> toshift;
         
         for (size_t i = 0; i < sorted.size(); ++i) {
-            if (subregions[sorted[i]].used 
+            if (subregions[sorted[i]].used() 
                 && subregions[sorted[i]].a_x >= subregions[clear_index].b_x) {
                 append_shift_list(toshift, subregions[sorted[i]].a_x, sorted[i]);
             }
@@ -658,9 +721,7 @@ class place_images1
                 dest.a_y = subregions[left_most].a_y;
                 dest.b_x = dest.a_x + subregions[left_most].b_x - subregions[left_most].a_x;
                 dest.b_y = subregions[left_most].b_y;
-                
-                grid.move_subregion(subregions[left_most], dest);
-                
+                                
                 subregions[left_most].a_x = dest.a_x;
                 subregions[left_most].b_x = dest.b_x;
                 
@@ -673,12 +734,50 @@ class place_images1
         }
     }
     
-    // Upload all of the used images.
-    void last_phase(void)
+    uint16_t get_top_column_from_base(uint16_t base)
+    {
+        // TODO: finish.
+        
+        uint16_t y_iter = subregions[base].a_y;
+        uint16_t index = base;
+        uint16_t width = atlas.dims_x[base];
+        
+        return -1;
+    }
+    
+    void replace_min_width_column(void)
+    {
+        // TODO: finish.
+        
+        uint16_t next_most_min_width = find_min_count_column();
+        
+        // implicit relationship: 
+        // since find_min_width_column()
+        // traverses the sorted indices in order
+        // to find the used column with the least
+        // images, the index provided 
+        // is always the bottom-most image,
+        // since height is sorted descending
+        
+        assert(subregions[next_most_min_width].a_y == 0
+               && "Something's wrong: given the nature of the sorted indices, the a_y needs to be 0.");
+        
+        for (subregion_t& subregion: subregions) {
+            if (subregion.moving()) {
+                
+            }
+        }
+    }
+    
+    // Final phase: we're finished
+    // placing images - some are likely unused,
+    // so naturally only add the images we've 
+    // chosen to the atlas' texture
+    void upload_used_images(void)
     {
         atlas.bind();
         for (size_t i = 0; i < atlas.num_images; ++i) {
-            if (subregions[i].used) {
+            if (subregions[i].used()) {
                 atlas.fill_image(subregions[i].a_x, 
                                  subregions[i].a_y, 
                                  i);
@@ -700,7 +799,7 @@ class place_images1
         size_t i = 0;
         for (const subregion_t& s: subregions) {
             ss  << "\t" << SS_INDEX(i) 
-                << "{ used: " << std::to_string(s.used) 
+                << "{ used: " << std::to_string(s.flags) 
                 << ", a_x: " << s.a_x 
                 << ", a_y: " << s.a_y 
                 << ", b_x: " << s.b_x
@@ -713,24 +812,30 @@ class place_images1
     }
     
 public:
-    place_images1(const atlas_t& atlas_)
+    gen_layout(const atlas_t& atlas_, uint16_t flags = GEN_LAYOUT_ALL_STAGES)
     :   clear_index(0),
         sorted(sort_images(atlas_)),
         subregions(atlas_.num_images),
-        grid(atlas_.atlas_width, atlas_.atlas_height),
         atlas(atlas_)
     {
-        first_phase();
-        second_phase();
-        third_phase();
-        last_phase();
+        place_sorted_columns();
+        
+        if (!!(flags & GEN_LAYOUT_CLEAR_MIN_WIDTH_COLUMN)) 
+            clear_min_width_column();
+        
+        if (!!(flags & GEN_LAYOUT_CONSOLODATE_COLUMNS_HORIZONTALLY))
+            consolodate_columns_horizontally();
+        
+        if (!!(flags & GEN_LAYOUT_REPLACE_MIN_WIDTH_COLUMN))
+            replace_min_width_column();
+        
+        upload_used_images();
     }
 };
 
 //------------------------------------------------------------------------------------
 // minor texture utils
 //------------------------------------------------------------------------------------
-
 static void alloc_blank_texture(size_t width, size_t height,
                                 uint32_t clear_val)
 {
@@ -764,8 +869,6 @@ static void upload_curr_image(atlas_t& atlas)
 //------------------------------------------------------------------------------------
 // pixel manipulations
 //------------------------------------------------------------------------------------
-
-
 static void convert_rgb_to_rgba(uint8_t* dest, const uint8_t* src, size_t dim_x,
                                 size_t dim_y)
 {
@@ -815,16 +918,24 @@ static void swap_rows_rgba(uint8_t* image_data, size_t dim_x, size_t dim_y)
 
 //------------------------------------------------------------------------------------
 // this should be the actual atlas_t ctor, but for now it works.
-// the ctor should also receive an arbitrary directory path to load images from,
-// and then just recursively traverse it...
 //------------------------------------------------------------------------------------
 
-static atlas_t make_atlas(void)
+static atlas_t make_atlas(std::string dirpath, 
+                          uint16_t gen_layout_flags = GEN_LAYOUT_ALL_STAGES)
 {
-    DIR* dir = opendir("./textures/gothic_block");
+    if (*(dirpath.end()) != '/')
+        dirpath.append(1, '/');
+    
+    DIR* dir = opendir(dirpath.c_str());
     struct dirent* ent = NULL;
     
     struct atlas_t atlas;
+    
+    if (!dir) {
+        logf("Could not open %s", dirpath.c_str());
+        g_running = false;
+        return atlas;
+    }
     
     assert(atlas.desired_bpp == 4
            && "Code is only meant to work with textures using desired bpp of 4!");
@@ -832,23 +943,21 @@ static atlas_t make_atlas(void)
     size_t area_accum = 0;
     
     while (!!(ent = readdir(dir))) {
-        char filepath[128];
-        memset(filepath, 0, sizeof(filepath));
-        strcpy(filepath, "./textures/gothic_block/");
-        strcat(filepath, ent->d_name);
+        std::string filepath(dirpath);
+        filepath.append(ent->d_name);
     
         int dx, dy, bpp;
-        stbi_uc* stbi_buffer = stbi_load(filepath, &dx, &dy, &bpp,
+        stbi_uc* stbi_buffer = stbi_load(filepath.c_str(), &dx, &dy, &bpp,
                                          STBI_default);
         
         if (!stbi_buffer) {
-            logf("Warning: could not open %s. Skipping.", filepath);
+            logf("Warning: could not open %s. Skipping.", filepath.c_str());
             continue;
         }
         
         if (bpp != atlas.desired_bpp && bpp != 3) {
             logf("Warning: found invalid bpp value of %i for %s. Skipping.",
-                 bpp, filepath);
+                 bpp, filepath.c_str());
             continue;
         }
         
@@ -911,7 +1020,7 @@ static atlas_t make_atlas(void)
     
     atlas.release();
     
-    place_images1 placed(atlas);
+    gen_layout placed(atlas, gen_layout_flags);
     
     logf("Total Images: %lu\nArea Accum: %lu",
          atlas.num_images, area_accum);
@@ -1008,7 +1117,11 @@ int main(int argc, const char * argv[])
     
     GL_H( glClearColor(0.0f, 0.0f, 0.0f, 1.0f) );
     
-    struct atlas_t atlas = make_atlas();
+    size_t atlas_view_index = 0;
+    std::array<atlas_t, 2> atlasses = {{
+        make_atlas("./textures/base_wall"),
+        make_atlas("./textures/base_wall", 0)
+    }};
     
     GLuint program = link_program(GLSL_VERTEX_SHADER, GLSL_FRAGMENT_SHADER);
     
@@ -1045,7 +1158,7 @@ int main(int argc, const char * argv[])
     GL_H( glUseProgram(program) );
     
     GL_H( glActiveTexture(GL_TEXTURE0) );
-    GL_H( glBindTexture(GL_TEXTURE_2D, atlas.img_tex_handle) );
+    GL_H( glBindTexture(GL_TEXTURE_2D, atlasses[0].img_tex_handle) );
     
     GL_H( glUniform1i(glGetUniformLocation(program, "sampler0"), 0) );
     
@@ -1083,20 +1196,28 @@ int main(int argc, const char * argv[])
         if (KEY_PRESS(GLFW_KEY_LEFT_SHIFT)) camera.raise(-CAMERA_STEP);
         
         if (atlas_view) {
-            atlas.bind();
-        } else {
-            atlas.bind_image();
+            atlasses[atlas_view_index].bind();
             
             if (KEY_PRESS(GLFW_KEY_RIGHT)) {
-                atlas.curr_image++;
-                upload_curr_image(atlas);
-                glfwSetWindowTitle(window, atlas.filenames[atlas.curr_image].c_str());
+                atlas_view_index++;
+                atlas_view_index &= 0x1;
+            }
+            
+        } else {
+            atlasses[0].bind_image();
+            
+            if (KEY_PRESS(GLFW_KEY_RIGHT)) {
+                atlasses[0].curr_image++;
+                upload_curr_image(atlasses[0]);
+                glfwSetWindowTitle(window, 
+                                   atlasses[0].filenames[atlasses[0].curr_image].c_str());
             }
             
             if (KEY_PRESS(GLFW_KEY_LEFT)) {
-                atlas.curr_image--;
-                upload_curr_image(atlas);
-                glfwSetWindowTitle(window, atlas.filenames[atlas.curr_image].c_str());
+                atlasses[0].curr_image--;
+                upload_curr_image(atlasses[0]);
+                glfwSetWindowTitle(window, 
+                                   atlasses[0].filenames[atlasses[0].curr_image].c_str());
             }
         }
     }
@@ -1109,6 +1230,9 @@ int main(int argc, const char * argv[])
     
     GL_H( glBindVertexArray(0) );
     GL_H( glDeleteVertexArrays(1, &vao) );
+    
+    for (atlas_t& atlas: atlasses)
+        atlas.free_texture_data();
     
     glfwDestroyWindow(window);
     glfwTerminate();
