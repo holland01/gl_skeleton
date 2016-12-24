@@ -217,30 +217,21 @@ fail:
 // atlas generation-specific classes/functions.
 //------------------------------------------------------------------------------------
 
-// Bit flag which tells whether or not
-// a particular image is rotated by 90 degs.
-// we can store about 2 bits of information
-// in each coord, since the max atlas dim size
-// worth going is 8192. So, we can use about
-// four flags total.
-
-// Technically speaking, since atlas
-// dims are always powers of two only,
-// we'd have 15 bits free, with only
-// one bit being used for the size.
-
-// There's no need for that at this time,
-// though.
+// When we have multiple atlasses, we use layers...
+// If a given coord _doesn't_ have either of the two bits 
+// set, then it's a part of the first layer, layer 0.
 enum {
-    ATLAS_COORDS_ROT_90 = 1 << 15
+    ATLAS_COORDS_LAYER_1 = 1 << 14,
+    ATLAS_COORDS_LAYER_2 = 1 << 15
+    ATLAS_COORDS_LAYER_MASK = ATLAS_COORDS_LAYER_1 | ATLAS_COORDS_LAYER_2
 };
 
 struct atlas_t {
     uint8_t desired_bpp = 4;
     uint8_t curr_image = 0;
 
-    uint16_t atlas_width = 2048;
-    uint16_t atlas_height = 4096;
+    uint16_t atlas_width = 1024;
+    uint16_t atlas_height = 1024;
 
     uint16_t max_width = 0;
     uint16_t max_height = 0;
@@ -260,6 +251,55 @@ struct atlas_t {
     
     std::unordered_map<uint16_t, uint16_t> filled; 
 
+    uint16_t coord(uint16_t image) const
+    {
+        return image & (~ATLAS_COORDS_LAYER_MASK);
+    }
+    
+    uint8_t layer(uint16_t image) const
+    {
+        uint16_t x_coord = coords_x[image];
+        
+        switch (x_coord & ATLAS_COORDS_LAYER_MASK) {
+            case 0: return 0;
+            case ATLAS_COORDS_LAYER_1: return 1;
+            case ATLAS_COORDS_LAYER_2: return 2;
+            
+            default:
+                logf("Layer bits for image %lu are invalid; image is for file %s.\n", 
+                     image, 
+                     filenames[image]);
+                assert(false);
+                break;
+        }
+        
+        return -1; // for compiler
+    }
+    
+    void set_layer(uint16_t image, uint8_t layer)
+    {
+        switch (layer)  {
+            case 0:
+                coords_x[image] = coords_x[image] & (~ATLAS_COORDS_LAYER_MASK);
+                break;
+                
+            case 1:
+                coords_x[image] |= ATLAS_COORDS_LAYER_1;
+                break;
+            
+            case 2:
+                coords_x[image] |= ATLAS_COORDS_LAYER_2;
+                break;
+            
+            default:
+                logf("Layer bits for image %lu are invalid; image is for file %s.\n", 
+                     image, 
+                     filenames[image]);
+                assert(false);
+                break;
+        }
+    }
+    
     void bind(void) const
     {
         GL_H( glBindTexture(GL_TEXTURE_2D, atlas_tex_handle) );
@@ -292,7 +332,7 @@ struct atlas_t {
         if (coords_x.size() != num_images)
             coords_x.resize(num_images, 0);
         
-        coords_x[image] = (uint16_t) x;
+        coords_x[image] = (coords_x[image] & ATLAS_COORDS_LAYER_MASK) | ((uint16_t) x);
         
         if (coords_y.size() != num_images)
             coords_y.resize(num_images, 0);
@@ -346,7 +386,7 @@ struct atlas_t {
                               &buffer_table[image][0]) );
     }
 
-    bool test_image_bounds_x(size_t x, size_t image) const { return  (x + dims_x[image]) < atlas_width; }
+    bool test_image_bounds_x(size_t x, size_t image) const { return (x + dims_x[image]) < atlas_width; }
 
     bool test_image_bounds_y(size_t y, size_t image) const { return (y + dims_y[image]) < atlas_height; }
 
@@ -424,6 +464,7 @@ static std::vector<uint16_t> sort_images(const atlas_t& atlas)
 
 static const glm::ivec2 g_ivec_unset = glm::ivec2( -1, -1 );
 
+template <size_t numLayers>
 class gGenLayoutBsp_t
 {
     atlas_t& atlas;
@@ -545,33 +586,51 @@ class gGenLayoutBsp_t
         return nullptr;
     }
     
+    using nodePtr_t = std::unique_ptr<node_t, void (*)(node_t*)>;
+    
+    std::array<nodePtr_t, numLayers> roots;
+    
+    uint32_t currLayer;
+    
     bool Insert(uint16_t image)
     {
-        node_t* res = Insert(root.get(), image);
+        node_t* res = Insert(roots[currLayer].get(), image);
+        
+        //! TODO move this if block out of the function,
+        // and replace change the !res check to  
+        // !Insert(image)
+        if (!res && currLayer < (numLayers - 1)) {
+            currLayer++;
+            atlas.set_layer(image, currLayer);
+        }
         
         return !!res;
-    }
-
-    std::unique_ptr<node_t, void (*)(node_t*)> root;
+    }    
 
 public:
     gGenLayoutBsp_t(atlas_t& atlas_, bool sorted = false)
         :   atlas(atlas_),
-            root(new node_t(), DestroyTree)
+            currLayer(0)
     {
-        root->dims = glm::ivec2(atlas.atlas_width, atlas.atlas_height);
+        for (nodePtr_t& root: roots) {
+            roots.reset(new node_t(), DestroyTree);
+        }
+                
+        bool isMaxLayer = false;
         
-        
-        atlas.bind();
-        if (sorted) {
-            std::vector<uint16_t> sorted = sort_images(atlas);
-            for (uint16_t i = 0; i < sorted.size(); ++i) {
-                Insert(root.get(), sorted[i]);
+        while (!atlas.all_filled() && !isMaxLayer) {
+            roots[currLayer]->dims = glm::ivec2(atlas.atlas_width, atlas.atlas_height);
+            if (sorted) {
+                std::vector<uint16_t> sorted = sort_images(atlas);
+                for (uint16_t i = 0; i < sorted.size(); ++i) {
+                    Insert(sorted[i]);
+                }
+            } else {
+                for (uint16_t i = 0; i < atlas.num_images; ++i) {
+                    Insert(i);
+                }
             }
-        } else {
-            for (uint16_t i = 0; i < atlas.num_images; ++i) {
-                Insert(root.get(), i);
-            }
+            isMaxLayer = currLayer == (numLayers - 1);
         }
         atlas.release();
     }
