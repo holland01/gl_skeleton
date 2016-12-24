@@ -29,6 +29,7 @@
 #include <sstream>
 #include <array>
 #include <memory>
+#include <unordered_map>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.c"
@@ -256,6 +257,8 @@ struct atlas_t {
 
     std::vector<std::vector<uint8_t>> buffer_table;
     std::vector<std::string> filenames;
+    
+    std::unordered_map<uint16_t, uint16_t> filled; 
 
     void bind(void) const
     {
@@ -295,6 +298,22 @@ struct atlas_t {
             coords_y.resize(num_images, 0);
             
         coords_y[image] = (uint16_t) y;
+        
+        filled[image] = 1;
+    }
+    
+    bool all_filled(void) 
+    {
+        if (filled.size() != num_images)
+            return false;
+        
+        for (auto i: filled) {
+            if (i.second == 0) {
+                return false;
+            }
+        }
+        
+        return true;
     }
 
     void move_image(size_t destx, size_t desty, size_t srcx, size_t srcy, size_t image,
@@ -331,7 +350,7 @@ struct atlas_t {
 
     bool test_image_bounds_y(size_t y, size_t image) const { return (y + dims_y[image]) < atlas_height; }
 
-    void free_texture_data(void)
+    void free_memory(void)
     {
         if (!!img_tex_handle || !!atlas_tex_handle) {
             GLint curr_bound_tex;
@@ -342,17 +361,33 @@ struct atlas_t {
                 GL_H( glBindTexture(GL_TEXTURE_2D, 0) );
             }
 
-            GL_H( glDeleteTextures(1, &img_tex_handle) );
-            GL_H( glDeleteTextures(1, &atlas_tex_handle) );
+            if (img_tex_handle) 
+                GL_H( glDeleteTextures(1, &img_tex_handle) );
+            
+            if (atlas_tex_handle) 
+                GL_H( glDeleteTextures(1, &atlas_tex_handle) );
 
             img_tex_handle = 0;
             atlas_tex_handle = 0;
         }
+        
+        curr_image = num_images = 0;
+        
+        max_width = max_height = 0;
+        
+        dims_x.clear();
+        dims_y.clear();
+        coords_x.clear();
+        coords_y.clear();
+        buffer_table.clear();
+        filenames.clear();
+        
+        filled.clear();
     }
 
     ~atlas_t(void)
     {
-        free_texture_data();
+        free_memory();
     }
 };
 
@@ -389,13 +424,16 @@ static std::vector<uint16_t> sort_images(const atlas_t& atlas)
 
 static const glm::ivec2 g_ivec_unset = glm::ivec2( -1, -1 );
 
-class gen_layout_bsp
+class gGenLayoutBsp_t
 {
     atlas_t& atlas;
 
+    // Only left child's are capable of storing image indices,
+    // from the perspective of the child's parent.
+    
+    // The "lines" (expressed implicitly) will only have
+    // positive normals that face either to the right, or upward.
     struct node_t {
-        // positive can be either up or right,
-        // negative can be either down or to the left
         bool region;
 
         int16_t image;
@@ -403,43 +441,42 @@ class gen_layout_bsp
         glm::ivec2 origin;
         glm::ivec2 dims;
 
-        node_t* left_child;
-        node_t* right_child;
+        node_t* leftChild;
+        node_t* rightChild;
 
         node_t(void)
             :   region(false),
                 image(-1),
                 origin(0, 0), dims(0, 0),
-                left_child(nullptr), right_child(nullptr)
+                leftChild(nullptr), rightChild(nullptr)
         {}
     };
 
-    static void destroy_tree(node_t* n)
+    static void DestroyTree(node_t* n)
     {
         if (n) {
-            destroy_tree(n->left_child);
-            destroy_tree(n->right_child);
+            DestroyTree(n->leftChild);
+            DestroyTree(n->rightChild);
             delete n;
         }
     }
 
-    node_t* place_image(node_t* node, uint16_t image)
+    node_t* Insert(node_t* node, uint16_t image)
     {
         if (node->region) {
-            node_t* n = place_image(node->left_child, image);
+            node_t* n = Insert(node->leftChild, image);
 
             if (n) {
-                node->left_child = n;
+                node->leftChild = n;
 				return node;
 			}
 
-            n = place_image(node->right_child, image);
+            n = Insert(node->rightChild, image);
 
 			if (n) {
-				node->right_child = n;
-            } else {
-                return nullptr;
-            }
+				node->rightChild = n;
+                return node;
+            } 
 		} else {
 
             if (node->image >= 0)
@@ -461,32 +498,32 @@ class gen_layout_bsp
             uint16_t dx = node->dims.x - image_dims.x;
             uint16_t dy = node->dims.y - image_dims.y;
             
-            node->left_child = new node_t();
-            node->right_child = new node_t();
+            node->leftChild = new node_t();
+            node->rightChild = new node_t();
             
             // Is the partition line vertical?
             if (dx > dy) {
-                node->left_child->dims.x = image_dims.x;
-                node->left_child->dims.y = node->dims.y;
-                node->left_child->origin = node->origin;
+                node->leftChild->dims.x = image_dims.x;
+                node->leftChild->dims.y = node->dims.y;
+                node->leftChild->origin = node->origin;
                 
-                node->right_child->dims.x = dx;
-                node->right_child->dims.y = node->dims.y;
-                node->right_child->origin = node->origin;
+                node->rightChild->dims.x = dx;
+                node->rightChild->dims.y = node->dims.y;
+                node->rightChild->origin = node->origin;
                 
-                node->right_child->origin.x += image_dims.x;
+                node->rightChild->origin.x += image_dims.x;
             
             // Nope, it's horizontal
             } else {
-                node->left_child->dims.x = node->dims.x;
-                node->left_child->dims.y = image_dims.y;
-                node->left_child->origin = node->origin;
+                node->leftChild->dims.x = node->dims.x;
+                node->leftChild->dims.y = image_dims.y;
+                node->leftChild->origin = node->origin;
                 
-                node->right_child->dims.x = node->dims.x;
-                node->right_child->dims.y = dy;
-                node->right_child->origin = node->origin;
+                node->rightChild->dims.x = node->dims.x;
+                node->rightChild->dims.y = dy;
+                node->rightChild->origin = node->origin;
                 
-                node->right_child->origin.y += image_dims.y;
+                node->rightChild->origin.y += image_dims.y;
             }
 
 			// The only way we're able to make it here 
@@ -498,29 +535,43 @@ class gen_layout_bsp
             // set to one of the image's dimension values. 
             
             // That said, an assert is good for true piece of mind...
-            node_t* n = place_image(node->left_child, image);
+            node->leftChild = Insert(node->leftChild, image);
 		
-            assert(n);
+            assert(node->leftChild);
             
-            node->left_child = n;
+            return node;
         }
 
-        return node;
+        return nullptr;
+    }
+    
+    bool Insert(uint16_t image)
+    {
+        node_t* res = Insert(root.get(), image);
+        
+        return !!res;
     }
 
     std::unique_ptr<node_t, void (*)(node_t*)> root;
 
 public:
-    gen_layout_bsp(atlas_t& atlas_)
+    gGenLayoutBsp_t(atlas_t& atlas_, bool sorted = false)
         :   atlas(atlas_),
-            root(new node_t(), destroy_tree)
+            root(new node_t(), DestroyTree)
     {
         root->dims = glm::ivec2(atlas.atlas_width, atlas.atlas_height);
-
+        
         
         atlas.bind();
-        for (uint16_t i = 0; i < atlas.num_images; ++i) {
-            place_image(root.get(), i);
+        if (sorted) {
+            std::vector<uint16_t> sorted = sort_images(atlas);
+            for (uint16_t i = 0; i < sorted.size(); ++i) {
+                Insert(root.get(), sorted[i]);
+            }
+        } else {
+            for (uint16_t i = 0; i < atlas.num_images; ++i) {
+                Insert(root.get(), i);
+            }
         }
         atlas.release();
     }
@@ -614,7 +665,7 @@ static void swap_rows_rgba(uint8_t* image_data, size_t dim_x, size_t dim_y)
 // this should be the actual atlas_t ctor, but for now it works.
 //------------------------------------------------------------------------------------
 
-static atlas_t make_atlas(std::string dirpath)
+void make_atlas(atlas_t& atlas, std::string dirpath, bool sort)
 {
     if (*(dirpath.end()) != '/')
         dirpath.append(1, '/');
@@ -622,17 +673,18 @@ static atlas_t make_atlas(std::string dirpath)
     DIR* dir = opendir(dirpath.c_str());
     struct dirent* ent = NULL;
 
-    struct atlas_t atlas;
 
     if (!dir) {
         logf("Could not open %s", dirpath.c_str());
         g_running = false;
-        return atlas;
+        return;
     }
 
     assert(atlas.desired_bpp == 4
            && "Code is only meant to work with textures using desired bpp of 4!");
 
+    atlas.free_memory();
+    
     size_t area_accum = 0;
 
     while (!!(ent = readdir(dir))) {
@@ -713,14 +765,9 @@ static atlas_t make_atlas(std::string dirpath)
 
     atlas.release();
 
-    //gen_layout placed(atlas, gen_layout_flags);
-
-
-    gen_layout_bsp placed(atlas);
+    gGenLayoutBsp_t placed(atlas, sort);
     logf("Total Images: %lu\nArea Accum: %lu",
          atlas.num_images, area_accum);
-
-    return atlas;
 }
 
 //------------------------------------------------------------------------------------
@@ -817,9 +864,6 @@ int main(int argc, const char * argv[])
     GL_H( glClearColor(0.0f, 0.0f, 0.0f, 1.0f) );
 
     size_t atlas_view_index = 0;
-    std::array<atlas_t, 1> atlasses = {{
-        make_atlas("./textures/base_wall")
-    }};
 
     GLuint program = link_program(GLSL_VERTEX_SHADER, GLSL_FRAGMENT_SHADER);
 
@@ -855,9 +899,6 @@ int main(int argc, const char * argv[])
 
     GL_H( glUseProgram(program) );
 
-    GL_H( glActiveTexture(GL_TEXTURE0) );
-    GL_H( glBindTexture(GL_TEXTURE_2D, atlasses[0].img_tex_handle) );
-
     GL_H( glUniform1i(glGetUniformLocation(program, "sampler0"), 0) );
 
     bool atlas_view = false;
@@ -866,8 +907,77 @@ int main(int argc, const char * argv[])
     camera.walk(-3.0f);
 
     const float CAMERA_STEP = 0.05f;
-
-    //g_running = true;
+    
+    /*
+    if (!atlasses[0].all_filled()) {
+        logf("Sorry, but you're going to need an extra atlas: %i/%i were actually inserted for an atlas of %i x %i.", 
+             atlasses[0].filled.size(), atlasses[0].num_images, atlasses[0].atlas_width, atlasses[0].atlas_height);
+    }*/
+    
+    std::vector<std::string> folders = {{
+        "aedm7",
+        "assaultQ",
+        "base_button",
+        "base_ceiling",
+        "base_door",
+        "base_floor",
+        "base_light",
+        "base_object",
+        "base_support",
+        "base_trim",
+        "base_wall",
+        "bata3dm1",
+        "common",
+        "ctf",
+        "effects",
+        "force",
+        "gothic_block",
+        "gothic_button",
+        "gothic_cath",
+        "gothic_ceiling",
+        "gothic_door",
+        "gothic_floor",
+        "gothic_light",
+        "gothic_trim",
+        "gothic_wall",
+        "liquids",
+        "marsbase",
+        "moon",
+        "moteof",
+        "organics",
+        "proto",
+        "sfx",
+        "skies",
+        "skin",
+        "stone",
+        "tim",
+        "water",
+        "xlab_doorQ"
+    }};
+    
+    int32_t folder_index = 0;
+    
+    std::string path = "./textures/gothic_block";
+    
+    std::array<atlas_t, 2> atlasses;
+    
+    auto lset_images = [&atlasses, &folders, &path, &folder_index](void)
+    {
+        if (folder_index < 0)
+            folder_index = folders.size() - 1;
+        else if (folder_index >= folders.size())
+            folder_index = 0;
+        
+        path = "./textures/" + folders[folder_index];
+        
+        make_atlas(atlasses[0], path, true);
+        make_atlas(atlasses[1], path, false);
+        
+        GL_H( glActiveTexture(GL_TEXTURE0) );
+        GL_H( glBindTexture(GL_TEXTURE_2D, atlasses[0].img_tex_handle) );
+    };
+    
+    lset_images();
     
     while (!KEY_PRESS(GLFW_KEY_ESCAPE)
            && !glfwWindowShouldClose(window)
@@ -885,6 +995,16 @@ int main(int argc, const char * argv[])
         glfwSwapBuffers(window);
         glfwPollEvents();
 
+        if (KEY_PRESS(GLFW_KEY_LEFT_BRACKET)) {
+            folder_index--;
+            lset_images();
+        } 
+        else if (KEY_PRESS(GLFW_KEY_RIGHT_BRACKET)) {
+            folder_index++;
+            lset_images();
+        }
+            
+        
         if (KEY_PRESS(GLFW_KEY_UP))
             atlas_view = !atlas_view;
 
@@ -896,10 +1016,30 @@ int main(int argc, const char * argv[])
         if (KEY_PRESS(GLFW_KEY_LEFT_SHIFT)) camera.raise(-CAMERA_STEP);
 
         if (atlas_view) {
-            atlasses[atlas_view_index].bind();
+            // mod is there in case we only decide to store one atlas
+            // in the array, for whatever reason
+            atlasses[atlas_view_index % atlasses.size()].bind();
 
             if (KEY_PRESS(GLFW_KEY_RIGHT)) {
                 atlas_view_index ^= 0x1;
+                
+                std::stringstream ss;
+                
+                switch (atlas_view_index) {
+                    case 0:
+                        ss << "(sorted)";
+                        break;
+                    case 1:
+                        ss << "(unsorted)";
+                        break;
+                    default:
+                        ss << "(unknown)";
+                        break;
+                }
+                
+                ss << ": " << path;
+                
+                glfwSetWindowTitle(window, ss.str().c_str());
             }
 
         } else {
@@ -921,6 +1061,8 @@ int main(int argc, const char * argv[])
         }
     }
 
+fin:
+        
     GL_H( glUseProgram(0) );
     GL_H( glDeleteProgram(program) );
 
@@ -931,7 +1073,7 @@ int main(int argc, const char * argv[])
     GL_H( glDeleteVertexArrays(1, &vao) );
 
     for (atlas_t& atlas: atlasses)
-        atlas.free_texture_data();
+        atlas.free_memory();
 
     glfwDestroyWindow(window);
     glfwTerminate();
