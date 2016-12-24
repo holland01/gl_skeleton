@@ -66,7 +66,7 @@ static void exit_on_gl_error(int line, const char* func, const char* expr)
         memset(msg, 0, sizeof(msg));
 
         sprintf(&msg[0], "GL ERROR (%x) in %s@%i [%s]: %s\n", err, func, line, expr,
-                (const char* )glewGetErrorString(err));
+                (const char* )gluErrorString(err));
 
         std::string smsg(msg);
 
@@ -214,12 +214,6 @@ fail:
 
 //------------------------------------------------------------------------------------
 // atlas generation-specific classes/functions.
-//
-// There's 3 major classes of importance:
-//
-// * atlas_t - used to store the actual atlas-related data
-// * gridset_t - a "bitset"-based grid useful for keeping track of regions.
-// * place_images1 - performs the major processing/generation of the atlas itself.
 //------------------------------------------------------------------------------------
 
 // Bit flag which tells whether or not
@@ -254,12 +248,9 @@ struct atlas_t {
     GLuint atlas_tex_handle = 0;
     uint32_t num_images = 0;
 
-    // these two are used during genartion
     std::vector<uint16_t> dims_x;
     std::vector<uint16_t> dims_y;
 
-    // these two aren't used during generation,
-    // but need to be written to afterward
     std::vector<uint16_t> coords_x;
     std::vector<uint16_t> coords_y;
 
@@ -281,7 +272,7 @@ struct atlas_t {
         GL_H( glBindTexture(GL_TEXTURE_2D, 0) );
     }
 
-    void fill_image(size_t x, size_t y, size_t image) const
+    void fill_image(size_t x, size_t y, size_t image)
     {
         assert(desired_bpp == 4 && "GL RGBA is used...");
 
@@ -294,6 +285,16 @@ struct atlas_t {
                               GL_RGBA,
                               GL_UNSIGNED_BYTE,
                               &buffer_table[image][0]) );
+        
+        if (coords_x.size() != num_images)
+            coords_x.resize(num_images, 0);
+        
+        coords_x[image] = (uint16_t) x;
+        
+        if (coords_y.size() != num_images)
+            coords_y.resize(num_images, 0);
+            
+        coords_y[image] = (uint16_t) y;
     }
 
     void move_image(size_t destx, size_t desty, size_t srcx, size_t srcy, size_t image,
@@ -390,7 +391,7 @@ static const glm::ivec2 g_ivec_unset = glm::ivec2( -1, -1 );
 
 class gen_layout_bsp
 {
-    const atlas_t& atlas;
+    atlas_t& atlas;
 
     struct node_t {
         // positive can be either up or right,
@@ -436,7 +437,9 @@ class gen_layout_bsp
 
 			if (n) {
 				node->right_child = n;
-			}
+            } else {
+                return nullptr;
+            }
 		} else {
 
             if (node->image >= 0)
@@ -455,42 +458,52 @@ class gen_layout_bsp
 
             node->region = true;
 
-            // Part of the algorithm's charm is that the
-            // partitioning line is inititally dependent
-            // on the image's largest dimension. Example:
-            // if one image has a higher width than height,
-            // then the unfilled region will have a partition
-            // line that lies atop the image and is horizontal.
-
-            // The line will move past the image if the region
-            // being partitioned has a larger width than the image.
-            // The next step, though, will involve moving behind
-            // the partition line and subdividing once again;
-            // this time with a vertical line.
-
-            // So, it seems that if the region_dim_y - the height
-            // of the image is larger than region_dim_x - the width
-            // of the image, then partition the region horizontally.
-
-            // In the opposite case, where the region_dim_x - the
-            // width of the image is larger than the region_dim_y
-            // - the height of the image, it's clear that a vertical
-            // partitioning scheme will be used instead.
-
-            // It's important to note that the normals for each
-            // partitioning plane will either be up or to the right,
-            // depending on the orientation of the line/plane.
-
-            if (image_dims.x > image_dims.y) {
-
+            uint16_t dx = node->dims.x - image_dims.x;
+            uint16_t dy = node->dims.y - image_dims.y;
+            
+            node->left_child = new node_t();
+            node->right_child = new node_t();
+            
+            // Is the partition line vertical?
+            if (dx > dy) {
+                node->left_child->dims.x = image_dims.x;
+                node->left_child->dims.y = node->dims.y;
+                node->left_child->origin = node->origin;
+                
+                node->right_child->dims.x = dx;
+                node->right_child->dims.y = node->dims.y;
+                node->right_child->origin = node->origin;
+                
+                node->right_child->origin.x += image_dims.x;
+            
+            // Nope, it's horizontal
             } else {
-
+                node->left_child->dims.x = node->dims.x;
+                node->left_child->dims.y = image_dims.y;
+                node->left_child->origin = node->origin;
+                
+                node->right_child->dims.x = node->dims.x;
+                node->right_child->dims.y = dy;
+                node->right_child->origin = node->origin;
+                
+                node->right_child->origin.y += image_dims.y;
             }
 
-			// The fact that we've made it this far should be an
-			// indication that node->left_child won't end up as null.
-            node->left_child = place_image(node->left_child, image);
-		}
+			// The only way we're able to make it here 
+            // is if node's dimensions are >= the image's dimensions.
+            // If they're exactly equal, then node would have already been
+            // set and this call won't happen.
+            // Otherwise, the left child's values are set to values
+            // which have already been examined for size, or are
+            // set to one of the image's dimension values. 
+            
+            // That said, an assert is good for true piece of mind...
+            node_t* n = place_image(node->left_child, image);
+		
+            assert(n);
+            
+            node->left_child = n;
+        }
 
         return node;
     }
@@ -498,15 +511,18 @@ class gen_layout_bsp
     std::unique_ptr<node_t, void (*)(node_t*)> root;
 
 public:
-    gen_layout_bsp(const atlas_t& atlas_)
+    gen_layout_bsp(atlas_t& atlas_)
         :   atlas(atlas_),
             root(new node_t(), destroy_tree)
     {
         root->dims = glm::ivec2(atlas.atlas_width, atlas.atlas_height);
 
+        
+        atlas.bind();
         for (uint16_t i = 0; i < atlas.num_images; ++i) {
             place_image(root.get(), i);
         }
+        atlas.release();
     }
 };
 
@@ -801,8 +817,7 @@ int main(int argc, const char * argv[])
     GL_H( glClearColor(0.0f, 0.0f, 0.0f, 1.0f) );
 
     size_t atlas_view_index = 0;
-    std::array<atlas_t, 2> atlasses = {{
-        make_atlas("./textures/base_wall"),
+    std::array<atlas_t, 1> atlasses = {{
         make_atlas("./textures/base_wall")
     }};
 
@@ -852,6 +867,8 @@ int main(int argc, const char * argv[])
 
     const float CAMERA_STEP = 0.05f;
 
+    //g_running = true;
+    
     while (!KEY_PRESS(GLFW_KEY_ESCAPE)
            && !glfwWindowShouldClose(window)
            && g_running) {
