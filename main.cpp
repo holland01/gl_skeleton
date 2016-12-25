@@ -383,7 +383,7 @@ struct atlas_t {
         GL_H( glBindTexture(GL_TEXTURE_2D, 0) );
     }
 
-    void fill_image(size_t x, size_t y, size_t image)
+    void fill_atlas_image(size_t x, size_t y, size_t image)
     {
         assert(desired_bpp == 4 && "GL RGBA is used...");
 
@@ -409,6 +409,22 @@ struct atlas_t {
         
         filled[image] = 1;
     }
+    
+    void fill_image(size_t image)
+    {
+        assert(desired_bpp == 4 && "GL RGBA is used...");
+        
+        GL_H( glTexSubImage2D(GL_TEXTURE_2D,
+                              0,
+                              0,
+                              0,
+                              dims_x[image],
+                              dims_y[image],
+                              GL_RGBA,
+                              GL_UNSIGNED_BYTE,
+                              &buffer_table[image][0]) );
+    }
+
     
     bool all_filled(void) 
     {
@@ -612,7 +628,7 @@ class gGenLayoutBsp_t
 
             if (node->dims.x == image_dims.x && node->dims.y == image_dims.y) {
                 node->image = image;
-                atlas.fill_image(node->origin.x, node->origin.y, node->image);
+                atlas.fill_atlas_image(node->origin.x, node->origin.y, node->image);
                 return node;
             }
 
@@ -758,7 +774,7 @@ static void upload_curr_image(atlas_t<numLayers>& atlas)
     // so we clear the entire buffer first
     alloc_blank_texture(atlas.max_width, atlas.max_height, 0xFFFFFFFF);
 
-    atlas.fill_image(0, 0, atlas.curr_image);
+    atlas.fill_image(atlas.curr_image);
 }
 
 //------------------------------------------------------------------------------------
@@ -1228,7 +1244,7 @@ int main(int argc, const char * argv[])
             }
         }
         
-        std::this_thread::sleep_for(std::chrono::nanoseconds(ONE_MILLISECOND * 100)); // Enable a rest period for key presses every iteration.
+        std::this_thread::sleep_for(std::chrono::nanoseconds(ONE_MILLISECOND * 100));
         
     }
 
