@@ -30,6 +30,8 @@
 #include <array>
 #include <memory>
 #include <unordered_map>
+#include <utility>
+#include <thread>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.c"
@@ -49,6 +51,9 @@
 #define SHADER(str) "#version 410 core\n"#str"\n"
 
 #define SS_INDEX(i) "[" << (i) << "]"
+
+#define MAX_ATLAS_LAYERS 5
+#define NUM_ATLAS_LAYERS 4
 
 //------------------------------------------------------------------------------------
 // logging, GL error reporting, and an out of place "running" bool...
@@ -91,6 +96,12 @@ void logf_impl( int line, const char* func, const char* fmt, ... )
     fputs( "\n", stdout );
     va_end( arg );
 }
+
+#ifdef DEBUG
+    #define IF_DEBUG(expr) (expr)
+#else
+    #define IF_DEBUG(expr) 
+#endif
 
 #define GL_H(expr) \
 do { \
@@ -220,13 +231,23 @@ fail:
 // When we have multiple atlasses, we use layers...
 // If a given coord _doesn't_ have either of the two bits 
 // set, then it's a part of the first layer, layer 0.
+
+// The layer bits are stored in bits 14 and 15 of the x origin for a given image.
+
+// as you can guess, the maximum amount of supported layers is currently 3.
+// an additional 2 layers can easily be supported by using the y-coordinate
+// as well, but that's going to add a little more complexity that's not currently worth it.
+
 enum {
     ATLAS_COORDS_LAYER_1 = 1 << 14,
-    ATLAS_COORDS_LAYER_2 = 1 << 15
+    ATLAS_COORDS_LAYER_2 = 1 << 15,
     ATLAS_COORDS_LAYER_MASK = ATLAS_COORDS_LAYER_1 | ATLAS_COORDS_LAYER_2
 };
 
+template <size_t numLayers = 1>
 struct atlas_t {
+    static_assert(1 <= numLayers && numLayers <= MAX_ATLAS_LAYERS, "template arg 'numLayers' for atlas_t has to be in the range [1, 3]");
+    
     uint8_t desired_bpp = 4;
     uint8_t curr_image = 0;
 
@@ -237,9 +258,10 @@ struct atlas_t {
     uint16_t max_height = 0;
 
     GLuint img_tex_handle = 0;
-    GLuint atlas_tex_handle = 0;
     uint32_t num_images = 0;
 
+    std::array<GLuint, numLayers> atlas_tex_handles;
+    
     std::vector<uint16_t> dims_x;
     std::vector<uint16_t> dims_y;
 
@@ -250,59 +272,105 @@ struct atlas_t {
     std::vector<std::string> filenames;
     
     std::unordered_map<uint16_t, uint16_t> filled; 
-
-    uint16_t coord(uint16_t image) const
+    
+    uint16_t origin_x(uint16_t image) const 
     {
-        return image & (~ATLAS_COORDS_LAYER_MASK);
+        return coords_x[image] & (~ATLAS_COORDS_LAYER_MASK);
+    }
+    
+    uint16_t origin_y(uint16_t image) const 
+    {
+        return coords_y[image] & (~ATLAS_COORDS_LAYER_MASK);
     }
     
     uint8_t layer(uint16_t image) const
-    {
-        uint16_t x_coord = coords_x[image];
+    {        
+        auto fetch_coord_layer = [this, &image](uint16_t coord) -> uint16_t {
+            switch (coord & ATLAS_COORDS_LAYER_MASK) {
+                case 0: return 0;
+                case ATLAS_COORDS_LAYER_1: return 1;
+                case ATLAS_COORDS_LAYER_2: return 2;
+                    
+                    // will fire if both bits are set
+                default:
+                    logf("Layer bits for image %lu are invalid; image is for file %s.\n", 
+                         image, 
+                         filenames[image]);
+                    assert(false);
+                    break;
+            }
+        };
         
-        switch (x_coord & ATLAS_COORDS_LAYER_MASK) {
-            case 0: return 0;
-            case ATLAS_COORDS_LAYER_1: return 1;
-            case ATLAS_COORDS_LAYER_2: return 2;
-            
-            default:
-                logf("Layer bits for image %lu are invalid; image is for file %s.\n", 
-                     image, 
-                     filenames[image]);
-                assert(false);
-                break;
+        uint16_t ret = fetch_coord_layer(coords_x[image]);
+        
+        if (ret) {
+            ret += fetch_coord_layer(coords_y[image]);
         }
         
-        return -1; // for compiler
+        return ret; // for compiler
     }
     
     void set_layer(uint16_t image, uint8_t layer)
     {
+        IF_DEBUG(
+            {   // adding a scoped block is necesary to keep the compiler happy :O
+                if (layer >= numLayers) {
+                    logf("out of bounds layer for this atlas; layer passed is %lu for image %lu (%s) which is part of an atlas with %lu layers.\n", 
+                         layer,
+                         image,
+                         filenames[image].c_str(),
+                         numLayers);
+                    assert(false);
+                }
+            }
+        );      // and this semi-colon is also necessary...
+        
+        IF_DEBUG(
+            {
+                
+            }
+        );
+        
+        logf("Switching layer to: %lu", layer);
+        
         switch (layer)  {
             case 0:
-                coords_x[image] = coords_x[image] & (~ATLAS_COORDS_LAYER_MASK);
+                coords_x[image] = origin_x(image); // implicit layer bits clear
+                coords_y[image] = origin_y(image);
                 break;
                 
             case 1:
                 coords_x[image] |= ATLAS_COORDS_LAYER_1;
+                coords_y[image] = origin_y(image);
                 break;
             
             case 2:
                 coords_x[image] |= ATLAS_COORDS_LAYER_2;
+                coords_y[image] = origin_y(image);
+                break;
+                
+            case 3:
+                coords_x[image] |= ATLAS_COORDS_LAYER_2;
+                coords_y[image] |= ATLAS_COORDS_LAYER_1;
+                break;
+                
+            case 4:
+                coords_x[image] |= ATLAS_COORDS_LAYER_2;
+                coords_y[image] |= ATLAS_COORDS_LAYER_2;
                 break;
             
             default:
                 logf("Layer bits for image %lu are invalid; image is for file %s.\n", 
                      image, 
-                     filenames[image]);
+                     filenames[image].c_str());
                 assert(false);
                 break;
         }
     }
     
-    void bind(void) const
+    void bind(uint8_t layer) const
     {
-        GL_H( glBindTexture(GL_TEXTURE_2D, atlas_tex_handle) );
+        GL_H( glBindTexture(GL_TEXTURE_2D, atlas_tex_handles[layer]) );
     }
 
     void bind_image(void) const
@@ -337,23 +405,14 @@ struct atlas_t {
         if (coords_y.size() != num_images)
             coords_y.resize(num_images, 0);
             
-        coords_y[image] = (uint16_t) y;
+        coords_y[image] = (coords_y[image] & ATLAS_COORDS_LAYER_MASK) | ((uint16_t) y);
         
         filled[image] = 1;
     }
     
     bool all_filled(void) 
     {
-        if (filled.size() != num_images)
-            return false;
-        
-        for (auto i: filled) {
-            if (i.second == 0) {
-                return false;
-            }
-        }
-        
-        return true;
+        return filled.size() == num_images;
     }
 
     void move_image(size_t destx, size_t desty, size_t srcx, size_t srcy, size_t image,
@@ -392,24 +451,40 @@ struct atlas_t {
 
     void free_memory(void)
     {
-        if (!!img_tex_handle || !!atlas_tex_handle) {
+        {
             GLint curr_bound_tex;
             GL_H( glGetIntegerv(GL_TEXTURE_BINDING_2D, &curr_bound_tex) );
 
-            if ((GLuint) curr_bound_tex == img_tex_handle
-                || (GLuint) curr_bound_tex == atlas_tex_handle) {
+            // We unbind if any of this atlas's textures are bound
+            // because a glDelete call on a bound item can't be fulfilled
+            // until that item is unbound
+            
+            bool bound = curr_bound_tex && curr_bound_tex == img_tex_handle;
+            for (GLuint handle = 0; handle < atlas_tex_handles.size() && !bound && curr_bound_tex; ++handle) {
+                bound = curr_bound_tex == atlas_tex_handles[handle];
+            }
+            
+            if (bound) {
                 GL_H( glBindTexture(GL_TEXTURE_2D, 0) );
             }
 
-            if (img_tex_handle) 
-                GL_H( glDeleteTextures(1, &img_tex_handle) );
-            
-            if (atlas_tex_handle) 
-                GL_H( glDeleteTextures(1, &atlas_tex_handle) );
-
-            img_tex_handle = 0;
-            atlas_tex_handle = 0;
+            // always favor API calls in bulk data...
+            {
+                std::vector<GLuint> to_del;
+                
+                if (img_tex_handle)
+                    to_del.push_back(img_tex_handle);
+                
+                for (GLuint handle: atlas_tex_handles) {
+                    if (handle)
+                        to_del.push_back(handle);
+                }
+                
+                GL_H( glDeleteTextures(to_del.size(), &to_del[0]) );
+            }
         }
+        
+        img_tex_handle = 0;
         
         curr_image = num_images = 0;
         
@@ -421,6 +496,8 @@ struct atlas_t {
         coords_y.clear();
         buffer_table.clear();
         filenames.clear();
+        
+        atlas_tex_handles.fill(0);
         
         filled.clear();
     }
@@ -442,7 +519,8 @@ struct atlas_t {
 // that particular width/column group.
 //------------------------------------------------------------------------------------
 
-static std::vector<uint16_t> sort_images(const atlas_t& atlas)
+template <size_t numLayers>
+static std::vector<uint16_t> sort_images(const atlas_t<numLayers>& atlas)
 {
     std::vector<uint16_t> sorted(atlas.num_images);
 
@@ -450,30 +528,34 @@ static std::vector<uint16_t> sort_images(const atlas_t& atlas)
         sorted[i] = i;
     }
 
-    std::sort(sorted.begin(), sorted.end(), [&atlas](uint16_t a, uint16_t b)
-              -> bool {
-                  if (atlas.dims_x[a] == atlas.dims_x[b]) {
-                      return atlas.dims_y[a] > atlas.dims_y[b];
-                  }
+    std::sort(sorted.begin(), sorted.end(), [&atlas](uint16_t a, uint16_t b) -> bool {
+          if (atlas.dims_x[a] == atlas.dims_x[b]) {
+              return atlas.dims_y[a] > atlas.dims_y[b];
+          }
 
-                  return atlas.dims_x[a] < atlas.dims_x[b];
-              });
+          return atlas.dims_x[a] < atlas.dims_x[b];
+    });
 
     return sorted;
 }
 
-static const glm::ivec2 g_ivec_unset = glm::ivec2( -1, -1 );
-
 template <size_t numLayers>
 class gGenLayoutBsp_t
 {
-    atlas_t& atlas;
+    using atlasType_t = atlas_t<numLayers>;
+    
+    atlasType_t& atlas;
 
     // Only left child's are capable of storing image indices,
     // from the perspective of the child's parent.
     
     // The "lines" (expressed implicitly) will only have
     // positive normals that face either to the right, or upward.
+    
+    struct node_t;
+    
+    using nodePtr_t = std::unique_ptr<node_t>;
+    
     struct node_t {
         bool region;
 
@@ -491,16 +573,16 @@ class gGenLayoutBsp_t
                 origin(0, 0), dims(0, 0),
                 leftChild(nullptr), rightChild(nullptr)
         {}
-    };
-
-    static void DestroyTree(node_t* n)
-    {
-        if (n) {
-            DestroyTree(n->leftChild);
-            DestroyTree(n->rightChild);
-            delete n;
+        
+        ~node_t(void) 
+        {
+            if (leftChild)
+                delete leftChild;
+            
+            if (rightChild)
+                delete rightChild;
         }
-    }
+    };
 
     node_t* Insert(node_t* node, uint16_t image)
     {
@@ -586,14 +668,16 @@ class gGenLayoutBsp_t
         return nullptr;
     }
     
-    using nodePtr_t = std::unique_ptr<node_t, void (*)(node_t*)>;
-    
     std::array<nodePtr_t, numLayers> roots;
     
     uint32_t currLayer;
     
     bool Insert(uint16_t image)
     {
+        if (atlas.filled.find(image) != atlas.filled.end()) {
+            return true;
+        }
+        
         node_t* res = Insert(roots[currLayer].get(), image);
         
         //! TODO move this if block out of the function,
@@ -606,33 +690,39 @@ class gGenLayoutBsp_t
         
         return !!res;
     }    
-
+    
 public:
-    gGenLayoutBsp_t(atlas_t& atlas_, bool sorted = false)
+    gGenLayoutBsp_t(atlasType_t& atlas_, bool sorted = false)
         :   atlas(atlas_),
+            roots({{}}),
             currLayer(0)
     {
         for (nodePtr_t& root: roots) {
-            roots.reset(new node_t(), DestroyTree);
+            root.reset(new node_t());
         }
                 
         bool isMaxLayer = false;
         
         while (!atlas.all_filled() && !isMaxLayer) {
+            atlas.bind(currLayer);
             roots[currLayer]->dims = glm::ivec2(atlas.atlas_width, atlas.atlas_height);
             if (sorted) {
                 std::vector<uint16_t> sorted = sort_images(atlas);
                 for (uint16_t i = 0; i < sorted.size(); ++i) {
-                    Insert(sorted[i]);
+                    if (!Insert(sorted[i]))
+                        break;
                 }
             } else {
                 for (uint16_t i = 0; i < atlas.num_images; ++i) {
-                    Insert(i);
+                    if (!Insert(i))
+                        break;
                 }
             }
             isMaxLayer = currLayer == (numLayers - 1);
+            atlas.release();
         }
-        atlas.release();
+        
+        logf("Fill Result: %i/%i\n", atlas.filled.size(), atlas.num_images);
     }
 };
 
@@ -655,7 +745,8 @@ static void alloc_blank_texture(size_t width, size_t height,
                        &blank[0]) );
 }
 
-static void upload_curr_image(atlas_t& atlas)
+template <size_t numLayers>
+static void upload_curr_image(atlas_t<numLayers>& atlas)
 {
     if (atlas.curr_image >= atlas.num_images)
         atlas.curr_image = 0;
@@ -724,14 +815,14 @@ static void swap_rows_rgba(uint8_t* image_data, size_t dim_x, size_t dim_y)
 // this should be the actual atlas_t ctor, but for now it works.
 //------------------------------------------------------------------------------------
 
-void make_atlas(atlas_t& atlas, std::string dirpath, bool sort)
+template <size_t numLayers>
+void make_atlas(atlas_t<numLayers>& atlas, std::string dirpath, bool sort)
 {
     if (*(dirpath.end()) != '/')
         dirpath.append(1, '/');
 
     DIR* dir = opendir(dirpath.c_str());
     struct dirent* ent = NULL;
-
 
     if (!dir) {
         logf("Could not open %s", dirpath.c_str());
@@ -811,20 +902,22 @@ void make_atlas(atlas_t& atlas, std::string dirpath, bool sort)
 
     upload_curr_image(atlas);
 
-    GL_H( glGenTextures(1, &atlas.atlas_tex_handle) );
+    GL_H( glGenTextures(numLayers, &atlas.atlas_tex_handles[0]) );
 
-    atlas.bind();
+    for (size_t i = 0; i < atlas.atlas_tex_handles.size(); ++i) {
+        atlas.bind(i);
 
-    GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) );
-    GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) );
-    GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE) );
-    GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE) );
+        GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) );
+        GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) );
+        GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE) );
+        GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE) );
 
-    alloc_blank_texture(atlas.atlas_width, atlas.atlas_height, 0xFF0000FF);
+        alloc_blank_texture(atlas.atlas_width, atlas.atlas_height, 0xFF0000FF);
+    }
 
     atlas.release();
 
-    gGenLayoutBsp_t placed(atlas, sort);
+    gGenLayoutBsp_t<numLayers> placed(atlas, sort);
     logf("Total Images: %lu\nArea Accum: %lu",
          atlas.num_images, area_accum);
 }
@@ -897,6 +990,8 @@ struct vertex_t {
 
 #define KEY_PRESS(key) (glfwGetKey(window, (key)) == GLFW_PRESS)
 
+#define ONE_MILLISECOND 1000000 // in nano seconds
+
 int main(int argc, const char * argv[])
 {
     glfwInit();
@@ -906,7 +1001,7 @@ int main(int argc, const char * argv[])
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-    glfwWindowHint(GLFW_STICKY_KEYS, GLFW_TRUE);
+   // glfwWindowHint(GLFW_STICKY_KEYS, GLFW_TRUE);
 
     camera_t camera(640, 480);
     GLFWwindow* window = glfwCreateWindow(camera.view_width(),
@@ -967,12 +1062,6 @@ int main(int argc, const char * argv[])
 
     const float CAMERA_STEP = 0.05f;
     
-    /*
-    if (!atlasses[0].all_filled()) {
-        logf("Sorry, but you're going to need an extra atlas: %i/%i were actually inserted for an atlas of %i x %i.", 
-             atlasses[0].filled.size(), atlasses[0].num_images, atlasses[0].atlas_width, atlasses[0].atlas_height);
-    }*/
-    
     std::vector<std::string> folders = {{
         "aedm7",
         "assaultQ",
@@ -1014,11 +1103,13 @@ int main(int argc, const char * argv[])
         "xlab_doorQ"
     }};
     
-    int32_t folder_index = 0;
+    int32_t folder_index = 4;
     
-    std::string path = "./textures/gothic_block";
+    int16_t display_layer = 0;
     
-    std::array<atlas_t, 2> atlasses;
+    std::string path;
+    
+    std::array<atlas_t<NUM_ATLAS_LAYERS>, 2> atlasses;
     
     auto lset_images = [&atlasses, &folders, &path, &folder_index](void)
     {
@@ -1034,6 +1125,15 @@ int main(int argc, const char * argv[])
         
         GL_H( glActiveTexture(GL_TEXTURE0) );
         GL_H( glBindTexture(GL_TEXTURE_2D, atlasses[0].img_tex_handle) );
+    
+        std::stringstream ss;
+        uint16_t i = 0;
+        for (const std::string& fname: atlasses[0].filenames) {
+            ss << SS_INDEX(i) << fname << "\n";
+            ++i;
+        }
+        
+        logf("Image Filenames:\n%s", ss.str().c_str());
     };
     
     lset_images();
@@ -1062,7 +1162,6 @@ int main(int argc, const char * argv[])
             folder_index++;
             lset_images();
         }
-            
         
         if (KEY_PRESS(GLFW_KEY_UP))
             atlas_view = !atlas_view;
@@ -1074,32 +1173,42 @@ int main(int argc, const char * argv[])
         if (KEY_PRESS(GLFW_KEY_SPACE)) camera.raise(CAMERA_STEP);
         if (KEY_PRESS(GLFW_KEY_LEFT_SHIFT)) camera.raise(-CAMERA_STEP);
 
+        if (KEY_PRESS(GLFW_KEY_M)) {
+            display_layer = (display_layer + 1) % NUM_ATLAS_LAYERS;
+        }
+        
+        if (KEY_PRESS(GLFW_KEY_N)) {
+            display_layer--;
+            if (display_layer < 0)
+                display_layer = NUM_ATLAS_LAYERS - 1;
+        }
+        
         if (atlas_view) {
             // mod is there in case we only decide to store one atlas
             // in the array, for whatever reason
-            atlasses[atlas_view_index % atlasses.size()].bind();
+            atlasses[atlas_view_index % atlasses.size()].bind(display_layer);
 
             if (KEY_PRESS(GLFW_KEY_RIGHT)) {
                 atlas_view_index ^= 0x1;
-                
-                std::stringstream ss;
-                
-                switch (atlas_view_index) {
-                    case 0:
-                        ss << "(sorted)";
-                        break;
-                    case 1:
-                        ss << "(unsorted)";
-                        break;
-                    default:
-                        ss << "(unknown)";
-                        break;
-                }
-                
-                ss << ": " << path;
-                
-                glfwSetWindowTitle(window, ss.str().c_str());
             }
+            
+            std::stringstream ss;
+            
+            switch (atlas_view_index) {
+                case 0:
+                    ss << "(sorted)";
+                    break;
+                case 1:
+                    ss << "(unsorted)";
+                    break;
+                default:
+                    ss << "(unknown)";
+                    break;
+            }
+            
+            ss << ": " << path << "; layer " << display_layer;
+            
+            glfwSetWindowTitle(window, ss.str().c_str());
 
         } else {
             atlasses[0].bind_image();
@@ -1118,6 +1227,9 @@ int main(int argc, const char * argv[])
                                    atlasses[0].filenames[atlasses[0].curr_image].c_str());
             }
         }
+        
+        std::this_thread::sleep_for(std::chrono::nanoseconds(ONE_MILLISECOND * 100)); // Enable a rest period for key presses every iteration.
+        
     }
 
 fin:
@@ -1131,7 +1243,7 @@ fin:
     GL_H( glBindVertexArray(0) );
     GL_H( glDeleteVertexArrays(1, &vao) );
 
-    for (atlas_t& atlas: atlasses)
+    for (atlas_t<NUM_ATLAS_LAYERS>& atlas: atlasses)
         atlas.free_memory();
 
     glfwDestroyWindow(window);
