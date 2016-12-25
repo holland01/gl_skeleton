@@ -544,7 +544,7 @@ static std::vector<uint16_t> sort_images(const atlas_t& atlas)
 
     std::sort(sorted.begin(), sorted.end(), [&atlas](uint16_t a, uint16_t b) -> bool {
           if (atlas.dims_x[a] == atlas.dims_x[b]) {
-              return atlas.dims_y[a] > atlas.dims_y[b];
+              return atlas.dims_y[a] < atlas.dims_y[b];
           }
 
           return atlas.dims_x[a] < atlas.dims_x[b];
