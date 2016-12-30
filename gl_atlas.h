@@ -139,6 +139,8 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
     static void alloc_blank_texture(size_t width, size_t height,
                                     uint32_t clear_val);
     
+    using image_filled_map_t = std::unordered_map<uint16_t, uint8_t>;
+    
     struct atlas_t {    
         uint8_t desired_bpp = 4;
         
@@ -164,8 +166,6 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         
         std::vector<std::vector<uint8_t>> buffer_table;
         std::vector<std::string> filenames;
-        
-        std::unordered_map<uint16_t, uint16_t> filled; 
         
         uint16_t origin_x(uint16_t image) const 
         {
@@ -296,8 +296,6 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                 coords_y.resize(num_images, 0);
             
             coords_y[image] = (coords_y[image] & ATLAS_COORDS_LAYER_MASK) | ((uint16_t) y);
-            
-            filled[image] = 1;
         }
         
         void fill_atlas_image(size_t x, size_t y, size_t image)
@@ -331,12 +329,6 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                                   GL_RGBA,
                                   GL_UNSIGNED_BYTE,
                                   &buffer_table[image][0]) );
-        }
-        
-        
-        bool all_filled(void) 
-        {
-            return filled.size() == num_images;
         }
         
         void move_image(size_t destx, size_t desty, size_t srcx, size_t srcy, size_t image,
@@ -412,9 +404,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             buffer_table.clear();
             filenames.clear();
             
-            layer_tex_handles.clear();
-            
-            filled.clear();
+            layer_tex_handles.clear();            
         }
         
         ~atlas_t(void)
@@ -424,65 +414,40 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
     };
     
     
-    static std::vector<uint16_t> sort_images(const atlas_t& atlas)
-    {
-        std::vector<uint16_t> sorted(atlas.num_images);
-        
-        for (size_t i = 0; i < atlas.num_images; ++i) {
-            sorted[i] = i;
-        }
-        
-        std::sort(sorted.begin(), sorted.end(), [&atlas](uint16_t a, uint16_t b) -> bool {
-            if (atlas.dims_x[a] == atlas.dims_x[b]) {
-                return atlas.dims_y[a] < atlas.dims_y[b];
-            }
-            
-            return atlas.dims_x[a] < atlas.dims_x[b];
-        });
-        
-        return sorted;
-    }
-    
     //------------------
     // gen_layer_bsp
     // 
-    // this class has two main purposes:
-    // the first is generating an actual texture atlas
-    // for a series of layers 
-    //
-    // the second is assessing whether or not 
-    // a) sorted images for a particular layer
-    // actually save space
-    
-    // and b) how large a series of layers
-    // needs to be.
+    // generates a layer (think of "layer" in this sense as just a separate atlas texture belonging to a whole image)
+    // for a group of images. The core algorithm is based on 2D BSP generation.
+    // 
+    // it assesses whether or not sorted images for this layer
+    // actually save space and how large this layer actually needs to be. 
     //------------------
     
-    template <size_t maxLayers>
     class gen_layer_bsp
     {
-        using atlas_type_t = atlas_t;
+        struct node_t;
         
+        using node_ptr_t = std::unique_ptr<node_t>;
+        using atlas_type_t = atlas_t;
+            
         atlas_type_t& atlas;
+        
+        // one for a sorted atlas, the other for an unsorted atlas. The atlas
+        // which takes the least amount of space is the winner
+        std::array<node_ptr_t, 2> roots; 
+        std::array<glm::ivec3, 2> layer_dims;
         
         // Only left child's are capable of storing image indices,
         // from the perspective of the child's parent.
         
         // The "lines" (expressed implicitly) will only have
         // positive normals that face either to the right, or upward.
-        
-        struct node_t;
-        
-        using node_ptr_t = std::unique_ptr<node_t>;
-        
-        const std::vector<uint16_t> images;
-        
-        glm::ivec2 layer_dims;
-        
+    
         struct node_t {
             bool region;
             
-            int16_t image;
+            int32_t image;
             
             glm::ivec2 origin;
             glm::ivec2 dims;
@@ -490,11 +455,13 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             node_t* left_child;
             node_t* right_child;
             
+            
+            // all nodes begin with an image index of -2, because -1 implies they are a region.
             node_t(void)
             :   region(false),
-            image(-1),
-            origin(0, 0), dims(0, 0),
-            left_child(nullptr), right_child(nullptr)
+                image(-2), 
+                origin(0, 0), dims(0, 0),
+                left_child(nullptr), right_child(nullptr)
             {}
             
             ~node_t(void) 
@@ -507,20 +474,20 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             }
         };
         
-        node_t* Insert(node_t* node, uint16_t image)
+        node_t* insert_node(node_t* node, uint16_t image, uint8_t dims_index)
         {
-            if (node->region) {
-                node_t* n = Insert(node->leftChild, image);
+            if (node->image == -1) {
+                node_t* n = insert_node(node->left_child, image, dims_index);
                 
                 if (n) {
                     node->leftChild = n;
                     return node;
                 }
                 
-                n = Insert(node->rightChild, image);
+                n = insert_node(node->right_child, image, dims_index);
                 
                 if (n) {
-                    node->rightChild = n;
+                    node->right_child = n;
                     return node;
                 } 
             } else {
@@ -539,48 +506,48 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                     
                     node->image = image;
                     
-                    if ((node->origin.x + image_dims.x) > layer_dims.x)
-                        layer_dims.x = node->origin.x + image_dims.x;
+                    if ((node->origin.x + image_dims.x) > layer_dims[dims_index].x)
+                        layer_dims[dims_index].x = node->origin.x + image_dims.x;
                     
-                    if ((node->origin.y + image_dims.y) > layer_dims.y)
-                        layer_dims.y = node->origin.y + image_dims.y;
+                    if ((node->origin.y + image_dims.y) > layer_dims[dims_index].y)
+                        layer_dims[dims_index s].y = node->origin.y + image_dims.y;
                     
                     atlas.write_origins(node->origin.x, node->origin.y, node->image);
                     
                     return node;
                 }
                 
-                node->region = true;
+                node->image = -1;
                 
                 uint16_t dx = node->dims.x - image_dims.x;
                 uint16_t dy = node->dims.y - image_dims.y;
                 
-                node->leftChild = new node_t();
-                node->rightChild = new node_t();
+                node->left_child = new node_t();
+                node->right_child = new node_t();
                 
                 // Is the partition line vertical?
                 if (dx > dy) {
-                    node->leftChild->dims.x = image_dims.x;
-                    node->leftChild->dims.y = node->dims.y;
-                    node->leftChild->origin = node->origin;
+                    node->left_child->dims.x = image_dims.x;
+                    node->left_child->dims.y = node->dims.y;
+                    node->left_child->origin = node->origin;
                     
-                    node->rightChild->dims.x = dx;
-                    node->rightChild->dims.y = node->dims.y;
-                    node->rightChild->origin = node->origin;
+                    node->right_child->dims.x = dx;
+                    node->right_child->dims.y = node->dims.y;
+                    node->right_child->origin = node->origin;
                     
-                    node->rightChild->origin.x += image_dims.x;
+                    node->right_child->origin.x += image_dims.x;
                     
                 // Nope, it's horizontal
                 } else {
-                    node->leftChild->dims.x = node->dims.x;
-                    node->leftChild->dims.y = image_dims.y;
-                    node->leftChild->origin = node->origin;
+                    node->left_child->dims.x = node->dims.x;
+                    node->left_child->dims.y = image_dims.y;
+                    node->left_child->origin = node->origin;
                     
-                    node->rightChild->dims.x = node->dims.x;
-                    node->rightChild->dims.y = dy;
-                    node->rightChild->origin = node->origin;
+                    node->right_child->dims.x = node->dims.x;
+                    node->right_child->dims.y = dy;
+                    node->right_child->origin = node->origin;
                     
-                    node->rightChild->origin.y += image_dims.y;
+                    node->right_child->origin.y += image_dims.y;
                 }
                 
                 // The only way we're able to make it here 
@@ -591,9 +558,9 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                 // which have already been examined for size, or are
                 // set to one of the image's dimension values. 
                 
-                node->leftChild = Insert(node->leftChild, image);
+                node->left_child = insert_node(node->left_child, image, dims_index);
                 
-                assert(node->leftChild);
+                assert(node->left_child);
                 
                 return node;
             }
@@ -601,56 +568,80 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             return nullptr;
         }
         
-        std::array<node_ptr_t, maxLayers> roots;
-        
-        uint32_t currLayer;
-        
-        bool Insert(uint16_t image)
+        bool insert(uint16_t image, uint16_t root)
         {
-            if (atlas.filled.find(image) != atlas.filled.end()) {
-                return true;
-            }
-            
-            node_t* res = Insert(roots[currLayer].get(), image);
-            
+            node_t* res = insert_node(roots[root].get(), image);
             
             return !!res;
         }    
         
-        void fill_layout(bool sorted)
+    public:
+        
+        // this isn't meant to be called very frequently,
+        // so it's fine for us to not cache the results..
+        const glm::ivec3& dims(bool& is_sorted_atlas) const
         {
-            while (!atlas.all_filled() && !isMaxLayer) {
-                atlas.maybe_add_layer(currLayer);
-                
-                atlas.bind(currLayer);
-                roots[currLayer]->dims = glm::ivec2(atlas.width, atlas.height);
-                if (sorted) {
-                    std::vector<uint16_t> sorted = sort_images(atlas);
-                    for (uint16_t i = 0; i < sorted.size(); ++i) {
-                        if (!Insert(sorted[i]))
-                            break;
-                    }
+            glm::vec2 unsorted(layer_dims[0]));
+            
+            glm::vec2 sorted(layer_dims[1]);
+            
+            if (layer_dims[0][2] == layer_dims[1][2]) {
+                is_sorted_atlas = glm::length(sorted) < glm::length(unsorted);
+                if (is_sorted_atlas) {
+                    return layer_dims[1];
                 } else {
-                    for (uint16_t i = 0; i < atlas.num_images; ++i) {
-                        if (!Insert(i))
-                            break;
-                    }
+                    return layer_dims[0];
                 }
-                isMaxLayer = currLayer == (maxLayers - 1);
-                atlas.release();
+            } else if (layer_dims[0][2] < layer_dims[1][2]) {
+                is_sorted_atlas = true;
+                return layer_dims[1];
+            } else {
+                is_sorted_atlas = false;
+                return layer_dims[0];
             }
         }
         
-    public:
-        gen_layer_bsp(atlas_type_t& atlas_,  bool sorted = false)
-        :   atlas(atlas_),
-            currLayer(0)
+        gen_layer_bsp(atlas_type_t& atlas_, std::array<image_fill_map_t, 2>& image_check)
+        :   atlas(atlas_)
         {
             for (node_ptr_t& root: roots) {
                 root.reset(new node_t());
             }
-                                    
             
+            // unsorted
+            {
+                for (auto& image: image_check[0]) {
+                    if (insert(image.first, 0)) {
+                        image.second = 1;
+                        layer_dims[0][2] += 1;
+                    }
+                }
+            }
+            
+            // sorted
+            {
+                std::vector<uint16_t> sorted(image_check[1].size(), 0);
+                
+                uint16_t i = 0;
+                
+                for (auto image: image_check[1])
+                    sorted[i++] = image.first;
+                
+                std::sort(sorted.begin(), sorted.end(), [this](uint16_t a, uint16_t b) -> bool {
+                    if (atlas.dims_x[a] == atlas.dims_x[b]) {
+                        return atlas.dims_y[a] < atlas.dims_y[b];
+                    }
+                    
+                    return atlas.dims_x[a] < atlas.dims_x[b];
+                });
+                
+                for (uint16_t image: sorted) {
+                    if (insert(image, 1)) {
+                        image_check[1][image] = 1; 
+                        layer_dims[1][2] += 1;
+                    }
+                }
+            }
             
             logf("Fill Result: %i/%i\n", atlas.filled.size(), atlas.num_images);
         }
@@ -740,6 +731,30 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
     //------------------------------------------------------------------------------------
     // this should be the actual atlas_t ctor, but for now it works.
     //------------------------------------------------------------------------------------
+    
+    // the TODO:
+    // create one image_fill_map_t which is to exist throughout the entire atlas generation.
+    // each iteration within the loop is going to consist of two local maps, which are used
+    // to assess and generate layers as needed
+    
+    // while global indices is not empty
+    //      allocate 2 local image_fill_map_ts
+    //      for each entry in the global image indices which is not 1:
+    //          add entry to both image_fill_map_ts
+    //      allocate gen_layer_bsp instance, pass both local image_fill_map_ts and atlas.
+
+    //      query dims, get the next power of two for each dimension. 
+    //      
+    //      allocate texture layer POT dims size, bind texture object via OpenGL.
+    //      
+    //      for each entry in the image_fill_map_t chosen by the gen_layout_bsp instance,
+    //          if the entry is supposed to be added to this layer,
+    //              remove its value from the global map
+    //              
+    //              set the coords' layer to this current layer.
+    //
+    //              fill the atlas layer with this entry's dimensions/coords
+    
     
     void make_atlas(atlas_t& atlas, std::string dirpath, bool sort)
     {
