@@ -127,11 +127,8 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
     // If a given coord _doesn't_ have either of the two bits 
     // set, then it's a part of the first layer, layer 0.
     
-    // The layer bits are stored in bits 14 and 15 of the x origin for a given image.
-    
-    // as you can guess, the maximum amount of supported layers is currently 3.
-    // an additional 2 layers can easily be supported by using the y-coordinate
-    // as well, but that's going to add a little more complexity that's not currently worth it.
+    // The layer bits are stored in bits 14 and 15 of the x and y origins for a given image.
+    // this gives us a maximum of 5 layers including the first one.
     
     enum {
         ATLAS_COORDS_LAYER_1 = 1 << 14,
@@ -144,7 +141,6 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
     
     struct atlas_t {    
         uint8_t desired_bpp = 4;
-        uint8_t curr_image = 0;
         
         uint16_t width = 1024;
         uint16_t height = 1024;
@@ -156,6 +152,9 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         uint32_t num_images = 0;
         
         std::vector<GLuint> layer_tex_handles;
+        
+        std::array<uint16_t, 5> widths;
+        std::array<uint16_t, 5> heights;
         
         std::vector<uint16_t> dims_x;
         std::vector<uint16_t> dims_y;
@@ -286,6 +285,21 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             GL_H( glBindTexture(GL_TEXTURE_2D, 0) );
         }
         
+        void write_origins(uint16_t image, uint16_t x, uint16_t y)
+        {
+            if (coords_x.size() != num_images)
+                coords_x.resize(num_images, 0);
+            
+            coords_x[image] = (coords_x[image] & ATLAS_COORDS_LAYER_MASK) | ((uint16_t) x);
+            
+            if (coords_y.size() != num_images)
+                coords_y.resize(num_images, 0);
+            
+            coords_y[image] = (coords_y[image] & ATLAS_COORDS_LAYER_MASK) | ((uint16_t) y);
+            
+            filled[image] = 1;
+        }
+        
         void fill_atlas_image(size_t x, size_t y, size_t image)
         {
             assert(desired_bpp == 4 && "GL RGBA is used...");
@@ -300,17 +314,8 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                                   GL_UNSIGNED_BYTE,
                                   &buffer_table[image][0]) );
             
-            if (coords_x.size() != num_images)
-                coords_x.resize(num_images, 0);
+            write_origins(x, y, image);
             
-            coords_x[image] = (coords_x[image] & ATLAS_COORDS_LAYER_MASK) | ((uint16_t) x);
-            
-            if (coords_y.size() != num_images)
-                coords_y.resize(num_images, 0);
-            
-            coords_y[image] = (coords_y[image] & ATLAS_COORDS_LAYER_MASK) | ((uint16_t) y);
-            
-            filled[image] = 1;
         }
         
         void fill_image(size_t image)
@@ -396,7 +401,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             
             img_tex_handle = 0;
             
-            curr_image = num_images = 0;
+            num_images = 0;
             
             max_width = max_height = 0;
             
@@ -438,8 +443,23 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         return sorted;
     }
     
+    //------------------
+    // gen_layer_bsp
+    // 
+    // this class has two main purposes:
+    // the first is generating an actual texture atlas
+    // for a series of layers 
+    //
+    // the second is assessing whether or not 
+    // a) sorted images for a particular layer
+    // actually save space
+    
+    // and b) how large a series of layers
+    // needs to be.
+    //------------------
+    
     template <size_t maxLayers>
-    class gen_layout_bsp
+    class gen_layer_bsp
     {
         using atlas_type_t = atlas_t;
         
@@ -455,6 +475,10 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         
         using node_ptr_t = std::unique_ptr<node_t>;
         
+        const std::vector<uint16_t> images;
+        
+        glm::ivec2 layer_dims;
+        
         struct node_t {
             bool region;
             
@@ -463,23 +487,23 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             glm::ivec2 origin;
             glm::ivec2 dims;
             
-            node_t* leftChild;
-            node_t* rightChild;
+            node_t* left_child;
+            node_t* right_child;
             
             node_t(void)
             :   region(false),
             image(-1),
             origin(0, 0), dims(0, 0),
-            leftChild(nullptr), rightChild(nullptr)
+            left_child(nullptr), right_child(nullptr)
             {}
             
             ~node_t(void) 
             {
-                if (leftChild)
-                    delete leftChild;
+                if (left_child)
+                    delete left_child;
                 
-                if (rightChild)
-                    delete rightChild;
+                if (right_child)
+                    delete right_child;
             }
         };
         
@@ -506,12 +530,23 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                 
                 glm::ivec2 image_dims(atlas.dims_x[image], atlas.dims_y[image]);
                 
-                if (node->dims.x < image_dims.x || node->dims.y < image_dims.y)
+                if (node->dims.x < image_dims.x 
+                    || node->dims.y < image_dims.y)
                     return nullptr;
                 
-                if (node->dims.x == image_dims.x && node->dims.y == image_dims.y) {
+                if (node->dims.x == image_dims.x 
+                    && node->dims.y == image_dims.y) {
+                    
                     node->image = image;
-                    atlas.fill_atlas_image(node->origin.x, node->origin.y, node->image);
+                    
+                    if ((node->origin.x + image_dims.x) > layer_dims.x)
+                        layer_dims.x = node->origin.x + image_dims.x;
+                    
+                    if ((node->origin.y + image_dims.y) > layer_dims.y)
+                        layer_dims.y = node->origin.y + image_dims.y;
+                    
+                    atlas.write_origins(node->origin.x, node->origin.y, node->image);
+                    
                     return node;
                 }
                 
@@ -535,7 +570,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                     
                     node->rightChild->origin.x += image_dims.x;
                     
-                    // Nope, it's horizontal
+                // Nope, it's horizontal
                 } else {
                     node->leftChild->dims.x = node->dims.x;
                     node->leftChild->dims.y = image_dims.y;
@@ -556,7 +591,6 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                 // which have already been examined for size, or are
                 // set to one of the image's dimension values. 
                 
-                // That said, an assert is good for true piece of mind...
                 node->leftChild = Insert(node->leftChild, image);
                 
                 assert(node->leftChild);
@@ -579,28 +613,12 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             
             node_t* res = Insert(roots[currLayer].get(), image);
             
-            //! TODO move this if block out of the function,
-            // and replace change the !res check to  
-            // !Insert(image)
-            if (!res && currLayer < (maxLayers - 1)) {
-                currLayer++;
-                atlas.set_layer(image, currLayer);
-            }
             
             return !!res;
         }    
         
-    public:
-        gen_layout_bsp(atlas_type_t& atlas_, bool sorted = false)
-        :   atlas(atlas_),
-        currLayer(0)
+        void fill_layout(bool sorted)
         {
-            for (node_ptr_t& root: roots) {
-                root.reset(new node_t());
-            }
-            
-            bool isMaxLayer = false;
-            
             while (!atlas.all_filled() && !isMaxLayer) {
                 atlas.maybe_add_layer(currLayer);
                 
@@ -621,6 +639,18 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                 isMaxLayer = currLayer == (maxLayers - 1);
                 atlas.release();
             }
+        }
+        
+    public:
+        gen_layer_bsp(atlas_type_t& atlas_,  bool sorted = false)
+        :   atlas(atlas_),
+            currLayer(0)
+        {
+            for (node_ptr_t& root: roots) {
+                root.reset(new node_t());
+            }
+                                    
+            
             
             logf("Fill Result: %i/%i\n", atlas.filled.size(), atlas.num_images);
         }
@@ -645,11 +675,8 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                            &blank[0]) );
     }
     
-    static void upload_curr_image(atlas_t& atlas)
+    static void clear_image(atlas_t& atlas, uint32_t which)
     {
-        if (atlas.curr_image >= atlas.num_images)
-            atlas.curr_image = 0;
-        
         // If the image to be overwritten is larger
         // than the one we're replacing it with,
         // the remaining area will
@@ -657,7 +684,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         // so we clear the entire buffer first
         alloc_blank_texture(atlas.max_width, atlas.max_height, 0xFFFFFFFF);
         
-        atlas.fill_image(atlas.curr_image);
+        atlas.fill_image(which);
     }
     
     //------------------------------------------------------------------------------------
@@ -733,6 +760,15 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         
         atlas.free_memory();
         
+        // Setup some upper bounds for the width/height values
+        {
+            GLint max_dims;
+            GL_H( glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_dims) );
+            
+            atlas.widths.fill((uint16_t) max_dims);
+            atlas.heights.fill((uint16_t) max_dims);
+        }
+        
         size_t area_accum = 0;
         
         while (!!(ent = readdir(dir))) {
@@ -798,11 +834,11 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE) );
         GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE) );
         
-        upload_curr_image(atlas);
+        clear_image(atlas, 0);
         
         atlas.release();
         
-        gen_layout_bsp<MAX_ATLAS_LAYERS> placed(atlas, sort);
+        gen_layer_bsp<MAX_ATLAS_LAYERS> placed(atlas, sort);
         
         logf("Total Images: %lu\nArea Accum: %lu",
              atlas.num_images, area_accum);

@@ -5,6 +5,8 @@ static bool g_running = true;
 
 #include "gl_atlas.h"
 
+#include <glm/gtx/string_cast.hpp>
+
 #ifdef GL_ATLAS_EXTRAS
 
 using namespace gl_atlas;
@@ -187,6 +189,18 @@ struct vertex_t {
     GLubyte color[4];
 };
 
+template <class clampType>
+static clampType clamp_circ(clampType x, clampType min, clampType max) 
+{
+    if (x < min) {
+        x = max;
+    } else if (x >= max) {
+        x = min;
+    }
+    
+    return x;
+}
+
 //------------------------------------------------------------------------------------
 
 #define KEY_PRESS(key) (glfwGetKey(window, (key)) == GLFW_PRESS)
@@ -264,6 +278,8 @@ int main(int argc, const char * argv[])
     camera.walk(-3.0f);
 
     const float CAMERA_STEP = 0.05f;
+    
+    int16_t curr_image = 0;
     
     std::vector<std::string> folders = {{
         "aedm7",
@@ -409,7 +425,8 @@ int main(int argc, const char * argv[])
                     break;
             }
             
-            ss << ": " << path << "; layer " << display_layer;
+            ss << ": " << path << "; layer " << display_layer
+            << "; dims " << glm::to_string(glm::ivec2(atlasses[0].width, atlasses[0].height));
             
             glfwSetWindowTitle(window, ss.str().c_str());
 
@@ -417,17 +434,17 @@ int main(int argc, const char * argv[])
             atlasses[0].bind_image();
 
             if (KEY_PRESS(GLFW_KEY_RIGHT)) {
-                atlasses[0].curr_image++;
-                upload_curr_image(atlasses[0]);
+                curr_image = clamp_circ<int16_t>(curr_image + 1, 0, atlasses[0].num_images);
+                clear_image(atlasses[0], curr_image);
                 glfwSetWindowTitle(window,
-                                   atlasses[0].filenames[atlasses[0].curr_image].c_str());
+                                   atlasses[0].filenames[curr_image].c_str());
             }
 
             if (KEY_PRESS(GLFW_KEY_LEFT)) {
-                atlasses[0].curr_image--;
-                upload_curr_image(atlasses[0]);
+                curr_image = clamp_circ<int16_t>(curr_image - 1, 0, atlasses[0].num_images);
+                clear_image(atlasses[0], curr_image);
                 glfwSetWindowTitle(window,
-                                   atlasses[0].filenames[atlasses[0].curr_image].c_str());
+                                   atlasses[0].filenames[curr_image].c_str());
             }
         }
         
