@@ -157,15 +157,11 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
     struct atlas_t {    
         uint8_t desired_bpp = 4;
         
-        uint32_t max_size = 1024;
-        
-        uint16_t width = 1024;
-        uint16_t height = 1024;
-        
         uint16_t max_width = 0;
         uint16_t max_height = 0;
         
-        GLuint img_tex_handle = 0;
+        GLuint img_tex_handle = 0; /* good for testing */
+        
         uint32_t num_images = 0;
         
         std::vector<GLuint> layer_tex_handles;
@@ -370,10 +366,6 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                                   &buffer_table[image][0]) );
         }
         
-        bool test_image_bounds_x(size_t x, size_t image) const { return (x + dims_x[image]) < width; }
-        
-        bool test_image_bounds_y(size_t y, size_t image) const { return (y + dims_y[image]) < height; }
-        
         void free_memory(void)
         {
             {
@@ -431,6 +423,11 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
     // 
     // it assesses whether or not sorted images for this layer
     // actually save space and how large this layer actually needs to be. 
+    //
+    // the set of images a layer has will be more efficiently placed if the
+    // variation of the image sizes is high; if a layer consists
+    // of images which are of the same dimensions, then there will be a lot of unused
+    // space.
     //------------------
     
     class gen_layer_bsp
@@ -598,28 +595,25 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             root->dims = glm::ivec2(atlas_.widths[layer], 
                                     atlas_.heights[layer]);
 
-            // sorted
-            {
-                std::vector<uint16_t> sorted(image_check.size(), 0);
+            std::vector<uint16_t> sorted(image_check.size(), 0);
+            
+            uint16_t i = 0;
+            
+            for (auto image: image_check)
+                sorted[i++] = image.first;
+            
+            std::sort(sorted.begin(), sorted.end(), [this](uint16_t a, uint16_t b) -> bool {
+                if (atlas.dims_x[a] == atlas.dims_x[b]) {
+                    return atlas.dims_y[a] > atlas.dims_y[b];
+                }
                 
-                uint16_t i = 0;
-                
-                for (auto image: image_check)
-                    sorted[i++] = image.first;
-                
-                std::sort(sorted.begin(), sorted.end(), [this](uint16_t a, uint16_t b) -> bool {
-                    if (atlas.dims_x[a] == atlas.dims_x[b]) {
-                        return atlas.dims_y[a] > atlas.dims_y[b];
-                    }
-                    
-                    return atlas.dims_x[a] > atlas.dims_x[b];
-                });
-                
-                for (uint16_t image: sorted) {
-                    if (insert(image)) {
-                        image_check[image] = 1; 
-                        layer_dims[2] += 1;
-                    }
+                return atlas.dims_x[a] > atlas.dims_x[b];
+            });
+            
+            for (uint16_t image: sorted) {
+                if (insert(image)) {
+                    image_check[image] = 1; 
+                    layer_dims[2] += 1;
                 }
             }
         }
@@ -657,7 +651,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
     }
     
     //------------------------------------------------------------------------------------
-    // pixel manipulations
+    // pix'
     //------------------------------------------------------------------------------------
     static void convert_rgb_to_rgba(uint8_t* dest, const uint8_t* src, size_t dim_x,
                                     size_t dim_y)
@@ -707,32 +701,53 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
     }
     
     //------------------------------------------------------------------------------------
-    // this should be the actual atlas_t ctor, but for now it works.
+    // gen
     //------------------------------------------------------------------------------------
     
-    // the TODO:
-    // create one image_fill_map_t which is to exist throughout the entire atlas generation.
-    // each iteration within the loop is going to consist of two local maps, which are used
-    // to assess and generate layers as needed
-    
-    // while global indices is not empty
-    //      allocate 2 local image_fill_map_ts
-    //      for each entry in the global image indices which is not 1:
-    //          add entry to both image_fill_map_ts
-    //      allocate gen_layer_bsp instance, pass both local image_fill_map_ts and atlas.
-
-    //      query dims, get the next power of two for each dimension. 
-    //      
-    //      allocate texture layer POT dims size, bind texture object via OpenGL.
-    //      
-    //      for each entry in the image_fill_map_t chosen by the gen_layout_bsp instance,
-    //          if the entry is supposed to be added to this layer,
-    //              remove its value from the global map
-    //              
-    //              set the coords' layer to this current layer.
-    //
-    //              fill the atlas layer with this entry's dimensions/coords
-    
+    void gen_atlas_layers(atlas_t& atlas)
+    {
+        image_fill_map_t global_unfill;
+        for (uint16_t i = 0; i < atlas.num_images; ++i) {
+            global_unfill[i];
+        }
+        
+        uint8_t layer = 0;
+        
+        while (!global_unfill.empty()) {
+            image_fill_map_t local_fill;
+            
+            local_fill.insert(global_unfill.begin(), 
+                              global_unfill.end());
+            
+            uint32_t best_map;
+            {
+                gen_layer_bsp placed(atlas, local_fill, layer);
+                
+                const glm::ivec3& dims = placed.dims();
+                
+                best_map = 1;
+                
+                atlas.widths[layer] = next_power2(dims[0]);
+                atlas.heights[layer] = next_power2(dims[1]);
+            }
+            
+            atlas.maybe_add_layer(layer);
+            
+            atlas.bind(layer);
+            
+            for (auto& image: local_fill) {
+                if (image.second) {
+                    atlas.set_layer(image.first, layer);
+                    atlas.fill_atlas_image(image.first);
+                    global_unfill.erase(image.first);
+                }
+            }
+            
+            atlas.release();
+            
+            layer++;
+        }
+    }
     
     void make_atlas(atlas_t& atlas, std::string dirpath, bool sort)
     {
@@ -758,8 +773,8 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             GLint max_dims;
             GL_H( glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_dims) );
             
-            atlas.widths.fill((uint16_t) max_dims >> 2);
-            atlas.heights.fill((uint16_t) max_dims >> 2);
+            atlas.widths.fill((uint16_t) max_dims);
+            atlas.heights.fill((uint16_t) max_dims);
         }
         
         size_t area_accum = 0;
@@ -818,6 +833,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         
         closedir(dir);
         
+    IF_DEBUG(
         GL_H( glGenTextures(1, &atlas.img_tex_handle) );
         
         atlas.bind_image();
@@ -830,51 +846,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         clear_image(atlas, 0);
         
         atlas.release();
-        
-        {
-            image_fill_map_t global_unfill;
-            for (uint16_t i = 0; i < atlas.num_images; ++i) {
-                global_unfill[i];
-            }
-            
-            uint8_t layer = 0;
-            
-            while (!global_unfill.empty()) {
-                image_fill_map_t local_fill;
-                
-                local_fill.insert(global_unfill.begin(), 
-                                     global_unfill.end());
-                
-                uint32_t best_map;
-                {
-                    gen_layer_bsp placed(atlas, local_fill, layer);
-                    
-                    const glm::ivec3& dims = placed.dims();
-                
-                    best_map = 1;
-                    
-                    atlas.widths[layer] = next_power2(dims[0]);
-                    atlas.heights[layer] = next_power2(dims[1]);
-                }
-            
-                atlas.maybe_add_layer(layer);
-                
-                atlas.bind(layer);
-
-                for (auto& image: local_fill) {
-                    if (image.second) {
-                        atlas.set_layer(image.first, layer);
-                        atlas.fill_atlas_image(image.first);
-                        global_unfill.erase(image.first);
-                    }
-                }
-                
-                atlas.release();
-                
-                layer++;
-            }
-        }
-        
+    )
         logf("Total Images: %lu\nArea Accum: %lu",
              atlas.num_images, area_accum);
     }
