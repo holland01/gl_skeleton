@@ -341,7 +341,7 @@ int main(int argc, const char * argv[])
         path = "./textures/" + folders[folder_index];
         
         make_atlas(atlasses[0], path, true);
-        make_atlas(atlasses[1], path, false);
+        //make_atlas(atlasses[1], path, false);
         
         GL_H( glActiveTexture(GL_TEXTURE0) );
         GL_H( glBindTexture(GL_TEXTURE_2D, atlasses[0].img_tex_handle) );
@@ -406,7 +406,7 @@ int main(int argc, const char * argv[])
         if (atlas_view) {
             // mod is there in case we only decide to store one atlas
             // in the array, for whatever reason
-            atlasses[atlas_view_index].bind(display_layer);
+            atlasses[atlas_view_index & 0x0].bind(display_layer);
 
             if (KEY_PRESS(GLFW_KEY_RIGHT)) {
                 atlas_view_index ^= 0x1;
@@ -427,7 +427,8 @@ int main(int argc, const char * argv[])
             }
             
             ss << ": " << path << "; layer " << display_layer
-            << "; dims " << glm::to_string(glm::ivec2(atlasses[0].width, atlasses[0].height));
+            << "; dims " << glm::to_string(glm::ivec2(atlasses[atlas_view_index].widths[display_layer], 
+                                                      atlasses[atlas_view_index].heights[display_layer]));
             
             glfwSetWindowTitle(window, ss.str().c_str());
 

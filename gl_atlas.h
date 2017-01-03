@@ -444,8 +444,8 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         
         // one for a sorted atlas, the other for an unsorted atlas. The atlas
         // which takes the least amount of space is the winner
-        std::array<node_ptr_t, 2> roots; 
-        std::array<glm::ivec3, 2> layer_dims;
+        node_ptr_t root;
+        glm::ivec3 layer_dims;
         
         // Only left child's are capable of storing image indices,
         // from the perspective of the child's parent.
@@ -482,17 +482,17 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             }
         };
         
-        node_t* insert_node(node_t* node, uint16_t image, uint8_t dims_index)
+        node_t* insert_node(node_t* node, uint16_t image)
         {
             if (node->region) {
-                node_t* n = insert_node(node->left_child, image, dims_index);
+                node_t* n = insert_node(node->left_child, image);
                 
                 if (n) {
                     node->left_child = n;
                     return node;
                 }
                 
-                n = insert_node(node->right_child, image, dims_index);
+                n = insert_node(node->right_child, image);
                 
                 if (n) {
                     node->right_child = n;
@@ -513,11 +513,11 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                     
                     node->image = image;
                     
-                    if ((node->origin.x + image_dims.x) > layer_dims[dims_index].x)
-                        layer_dims[dims_index].x = node->origin.x + image_dims.x;
+                    if ((node->origin.x + image_dims.x) > layer_dims.x)
+                        layer_dims.x = node->origin.x + image_dims.x;
                     
-                    if ((node->origin.y + image_dims.y) > layer_dims[dims_index].y)
-                        layer_dims[dims_index].y = node->origin.y + image_dims.y;
+                    if ((node->origin.y + image_dims.y) > layer_dims.y)
+                        layer_dims.y = node->origin.y + image_dims.y;
                     
                     atlas.write_origins(node->image, node->origin.x, node->origin.y);
                     
@@ -565,7 +565,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                 // which have already been examined for size, or are
                 // set to one of the image's dimension values. 
                 
-                node->left_child = insert_node(node->left_child, image, dims_index);
+                node->left_child = insert_node(node->left_child, image);
                 
                 assert(node->left_child);
                 
@@ -575,9 +575,9 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             return nullptr;
         }
         
-        bool insert(uint16_t image, uint16_t root)
+        bool insert(uint16_t image)
         {
-            node_t* res = insert_node(roots[root].get(), image, root);
+            node_t* res = insert_node(root.get(), image);
             
             return !!res;
         }    
@@ -586,75 +586,42 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         
         // this isn't meant to be called very frequently,
         // so it's fine for us to not cache the results..
-        const glm::ivec3& dims(bool& is_sorted_atlas) const
+        const glm::ivec3& dims(void) const
         {
-            glm::vec2 unsorted(layer_dims[0]);
-            glm::vec2 sorted(layer_dims[1]);
-            
-            if (layer_dims[0][2] == layer_dims[1][2]) {
-                is_sorted_atlas = glm::length(sorted) < glm::length(unsorted);
-                if (is_sorted_atlas) {
-                    return layer_dims[1];
-                } else {
-                    return layer_dims[0];
-                }
-            } else if (layer_dims[0][2] < layer_dims[1][2]) {
-                is_sorted_atlas = true;
-                return layer_dims[1];
-            } else {
-                is_sorted_atlas = false;
-                return layer_dims[0];
-            }
+            return layer_dims;
         }
         
-        gen_layer_bsp(atlas_type_t& atlas_, std::array<image_fill_map_t, 2>& image_check, uint32_t layer)
+        gen_layer_bsp(atlas_type_t& atlas_, image_fill_map_t& image_check, uint32_t layer)
             :   atlas(atlas_),
-                roots(
-                    {{
-                        node_ptr_t(new node_t(), node_t::destroy),
-                        node_ptr_t(new node_t(), node_t::destroy)
-                    }}
-                )
+                root(new node_t(), node_t::destroy)
         {
-            for (node_ptr_t& root: roots) {
-                root->dims = glm::ivec2(atlas_.widths[layer], atlas_.heights[layer]);
-            }
-            
-            // unsorted
-            {
-                for (auto& image: image_check[0]) {
-                    if (insert(image.first, 0)) {
-                        image.second = 1;
-                        layer_dims[0][2] += 1;
-                    }
-                }
-            }
-            /*
+            root->dims = glm::ivec2(atlas_.widths[layer], 
+                                    atlas_.heights[layer]);
+
             // sorted
             {
-                std::vector<uint16_t> sorted(image_check[1].size(), 0);
+                std::vector<uint16_t> sorted(image_check.size(), 0);
                 
                 uint16_t i = 0;
                 
-                for (auto image: image_check[1])
+                for (auto image: image_check)
                     sorted[i++] = image.first;
                 
                 std::sort(sorted.begin(), sorted.end(), [this](uint16_t a, uint16_t b) -> bool {
                     if (atlas.dims_x[a] == atlas.dims_x[b]) {
-                        return atlas.dims_y[a] < atlas.dims_y[b];
+                        return atlas.dims_y[a] > atlas.dims_y[b];
                     }
                     
-                    return atlas.dims_x[a] < atlas.dims_x[b];
+                    return atlas.dims_x[a] > atlas.dims_x[b];
                 });
                 
                 for (uint16_t image: sorted) {
-                    if (insert(image, 1)) {
-                        image_check[1][image] = 1; 
-                        layer_dims[1][2] += 1;
+                    if (insert(image)) {
+                        image_check[image] = 1; 
+                        layer_dims[2] += 1;
                     }
                 }
             }
-             */
         }
     };
     
@@ -791,8 +758,8 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             GLint max_dims;
             GL_H( glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_dims) );
             
-            atlas.widths.fill((uint16_t) max_dims);
-            atlas.heights.fill((uint16_t) max_dims);
+            atlas.widths.fill((uint16_t) max_dims >> 2);
+            atlas.heights.fill((uint16_t) max_dims >> 2);
         }
         
         size_t area_accum = 0;
@@ -873,19 +840,18 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             uint8_t layer = 0;
             
             while (!global_unfill.empty()) {
-                std::array<image_fill_map_t, 2> local_fill;
-                local_fill[0].insert(global_unfill.begin(), global_unfill.end());
-                local_fill[1].insert(global_unfill.begin(), global_unfill.end());
+                image_fill_map_t local_fill;
                 
+                local_fill.insert(global_unfill.begin(), 
+                                     global_unfill.end());
                 
                 uint32_t best_map;
                 {
                     gen_layer_bsp placed(atlas, local_fill, layer);
                     
-                    bool sorted = false;
-                    const glm::ivec3& dims = placed.dims(sorted);
+                    const glm::ivec3& dims = placed.dims();
                 
-                    best_map = sorted ? 1 : 0;
+                    best_map = 1;
                     
                     atlas.widths[layer] = next_power2(dims[0]);
                     atlas.heights[layer] = next_power2(dims[1]);
@@ -895,7 +861,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                 
                 atlas.bind(layer);
 
-                for (auto& image: local_fill[best_map]) {
+                for (auto& image: local_fill) {
                     if (image.second) {
                         atlas.set_layer(image.first, layer);
                         atlas.fill_atlas_image(image.first);
