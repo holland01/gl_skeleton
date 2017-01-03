@@ -341,11 +341,9 @@ int main(int argc, const char * argv[])
         path = "./textures/" + folders[folder_index];
         
         make_atlas(atlasses[0], path, true);
-        //make_atlas(atlasses[1], path, false);
         
         GL_H( glActiveTexture(GL_TEXTURE0) );
-        GL_H( glBindTexture(GL_TEXTURE_2D, atlasses[0].img_tex_handle) );
-    
+        
         std::stringstream ss;
         uint16_t i = 0;
         for (const std::string& fname: atlasses[0].filenames) {
@@ -403,53 +401,35 @@ int main(int argc, const char * argv[])
                 display_layer = atlasses[atlas_view_index].layer_tex_handles.size() - 1;
         }
         
-        if (atlas_view) {
-            // mod is there in case we only decide to store one atlas
-            // in the array, for whatever reason
-            atlasses[atlas_view_index & 0x0].bind(display_layer);
+        // mod is there in case we only decide to store one atlas
+        // in the array, for whatever reason
+        atlasses[atlas_view_index & 0x0].bind(display_layer);
 
-            if (KEY_PRESS(GLFW_KEY_RIGHT)) {
-                atlas_view_index ^= 0x1;
-            }
-            
-            std::stringstream ss;
-            
-            switch (atlas_view_index) {
-                case 0:
-                    ss << "(sorted)";
-                    break;
-                case 1:
-                    ss << "(unsorted)";
-                    break;
-                default:
-                    ss << "(unknown)";
-                    break;
-            }
-            
-            ss << ": " << path << "; layer " << display_layer
-            << "; dims " << glm::to_string(glm::ivec2(atlasses[atlas_view_index].widths[display_layer], 
-                                                      atlasses[atlas_view_index].heights[display_layer]));
+        if (KEY_PRESS(GLFW_KEY_RIGHT)) {
+            atlas_view_index ^= 0x1;
+        }
+        
+        std::stringstream ss;
+        
+        switch (atlas_view_index) {
+            case 0:
+                ss << "(sorted)";
+                break;
+            case 1:
+                ss << "(unsorted)";
+                break;
+            default:
+                ss << "(unknown)";
+                break;
+        }
+        
+        ss << ": " << path << "; layer " << display_layer
+        << "; dims " << glm::to_string(glm::ivec2(atlasses[atlas_view_index].widths[display_layer], 
+                                                  atlasses[atlas_view_index].heights[display_layer]));
             
             glfwSetWindowTitle(window, ss.str().c_str());
 
-        } else {
-            atlasses[0].bind_image();
-
-            if (KEY_PRESS(GLFW_KEY_RIGHT)) {
-                curr_image = clamp_circ<int16_t>(curr_image + 1, 0, atlasses[0].num_images);
-                clear_image(atlasses[0], curr_image);
-                glfwSetWindowTitle(window,
-                                   atlasses[0].filenames[curr_image].c_str());
-            }
-
-            if (KEY_PRESS(GLFW_KEY_LEFT)) {
-                curr_image = clamp_circ<int16_t>(curr_image - 1, 0, atlasses[0].num_images);
-                clear_image(atlasses[0], curr_image);
-                glfwSetWindowTitle(window,
-                                   atlasses[0].filenames[curr_image].c_str());
-            }
-        }
-        
+                
         std::this_thread::sleep_for(std::chrono::nanoseconds(ONE_MILLISECOND * 100));
         
     }

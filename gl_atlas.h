@@ -132,6 +132,8 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
     
 #define logf( ... ) logf_impl( __LINE__, __FUNCTION__, __VA_ARGS__ )
     
+#define DESIRED_BPP 4
+    
     //------------------------------------------------------------------------------------
     // atlas generation-specific classes/functions.
     //------------------------------------------------------------------------------------
@@ -154,14 +156,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
     
     using image_fill_map_t = std::unordered_map<uint16_t, uint8_t>;
     
-    struct atlas_t {    
-        uint8_t desired_bpp = 4;
-        
-        uint16_t max_width = 0;
-        uint16_t max_height = 0;
-        
-        GLuint img_tex_handle = 0; /* good for testing */
-        
+    struct atlas_t {            
         uint32_t num_images = 0;
         
         std::vector<GLuint> layer_tex_handles;
@@ -212,9 +207,9 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                 ret += fetch_coord_layer(coords_y[image]);
             }
             
-            return ret; // for compiler
+            return ret;        
         }
-        
+    
         void maybe_add_layer(uint32_t layer)
         {
             if (layer_tex_handles.size() > layer)
@@ -282,12 +277,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         {        
             GL_H( glBindTexture(GL_TEXTURE_2D, layer_tex_handles[layer]) );
         }
-        
-        void bind_image(void) const
-        {
-            GL_H( glBindTexture(GL_TEXTURE_2D, img_tex_handle) );
-        }
-        
+    
         void release(void) const
         {
             GL_H( glBindTexture(GL_TEXTURE_2D, 0) );
@@ -308,57 +298,10 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         
         void fill_atlas_image(size_t image)
         {
-            assert(desired_bpp == 4 && "GL RGBA is used...");
-            
             GL_H( glTexSubImage2D(GL_TEXTURE_2D,
                                   0,
                                   (GLsizei) origin_x(image),
                                   (GLsizei) origin_y(image),
-                                  dims_x[image],
-                                  dims_y[image],
-                                  GL_RGBA,
-                                  GL_UNSIGNED_BYTE,
-                                  &buffer_table[image][0]) );
-        }
-        
-        void fill_image(size_t image)
-        {
-            assert(desired_bpp == 4 && "GL RGBA is used...");
-            
-            GL_H( glTexSubImage2D(GL_TEXTURE_2D,
-                                  0,
-                                  0,
-                                  0,
-                                  dims_x[image],
-                                  dims_y[image],
-                                  GL_RGBA,
-                                  GL_UNSIGNED_BYTE,
-                                  &buffer_table[image][0]) );
-        }
-        
-        void move_image(size_t destx, size_t desty, size_t srcx, size_t srcy, size_t image,
-                        uint32_t clear_color)
-        {
-            assert(desired_bpp == 4 && "clear color is 4 bytes...");
-            
-            {
-                std::vector<uint32_t> clear_buffer(dims_x[image] * dims_y[image],
-                                                   clear_color);
-                GL_H( glTexSubImage2D(GL_TEXTURE_2D,
-                                      0,
-                                      (GLsizei) srcx,
-                                      (GLsizei) srcy,
-                                      dims_x[image],
-                                      dims_y[image],
-                                      GL_RGBA,
-                                      GL_UNSIGNED_BYTE,
-                                      &clear_buffer[0]) );
-            }
-            
-            GL_H( glTexSubImage2D(GL_TEXTURE_2D,
-                                  0,
-                                  (GLsizei) destx,
-                                  (GLsizei) desty,
                                   dims_x[image],
                                   dims_y[image],
                                   GL_RGBA,
@@ -376,7 +319,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                 // because a glDelete call on a bound item can't be fulfilled
                 // until that item is unbound
                 
-                bool bound = curr_bound_tex && curr_bound_tex == img_tex_handle;
+                bool bound = false;
                 for (GLuint handle = 0; handle < layer_tex_handles.size() && !bound && curr_bound_tex; ++handle) {
                     bound = curr_bound_tex == layer_tex_handles[handle];
                 }
@@ -384,19 +327,12 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                 if (bound) {
                     GL_H( glBindTexture(GL_TEXTURE_2D, 0) );
                 }
-                
-                // use only one API call since it's more performant
-                {
-                    layer_tex_handles.push_back(img_tex_handle);
-                    GL_H( glDeleteTextures(layer_tex_handles.size(), &layer_tex_handles[0]) );
-                }
+            
+                GL_H( glDeleteTextures(layer_tex_handles.size(), &layer_tex_handles[0]) );
             }
-            
-            img_tex_handle = 0;
-            
+                        
             num_images = 0;
             
-            max_width = max_height = 0;
             
             dims_x.clear();
             dims_y.clear();
@@ -637,18 +573,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                            GL_UNSIGNED_BYTE,
                            &blank[0]) );
     }
-    
-    static void clear_image(atlas_t& atlas, uint32_t which)
-    {
-        // If the image to be overwritten is larger
-        // than the one we're replacing it with,
-        // the remaining area will
-        // still be occupied by its texels,
-        // so we clear the entire buffer first
-        alloc_blank_texture(atlas.max_width, atlas.max_height, 0xFFFFFFFF);
-        
-        atlas.fill_image(which);
-    }
+
     
     //------------------------------------------------------------------------------------
     // pix'
@@ -763,7 +688,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             return;
         }
         
-        assert(atlas.desired_bpp == 4
+        assert(DESIRED_BPP == 4
                && "Code is only meant to work with textures using desired bpp of 4!");
         
         atlas.free_memory();
@@ -792,7 +717,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                 continue;
             }
             
-            if (bpp != atlas.desired_bpp && bpp != 3) {
+            if (bpp != DESIRED_BPP && bpp != 3) {
                 logf("Warning: found invalid bpp value of %i for %s. Skipping.",
                      bpp, filepath.c_str());
                 continue;
@@ -800,19 +725,13 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             
             atlas.filenames.push_back(std::string(ent->d_name));
             
-            std::vector<uint8_t> image_data(dx * dy * atlas.desired_bpp, 0);
+            std::vector<uint8_t> image_data(dx * dy * DESIRED_BPP, 0);
             
-            if (bpp != atlas.desired_bpp) {
+            if (bpp != DESIRED_BPP) {
                 convert_rgb_to_rgba(&image_data[0], stbi_buffer, dx, dy);
             } else {
-                memcpy(&image_data[0], stbi_buffer, dx * dy * atlas.desired_bpp);
+                memcpy(&image_data[0], stbi_buffer, dx * dy * DESIRED_BPP);
             }
-            
-            if (dx > atlas.max_width)
-                atlas.max_width = dx;
-            
-            if (dy > atlas.max_height)
-                atlas.max_height = dy;
             
             area_accum += dx * dy;
             
@@ -832,21 +751,9 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         }
         
         closedir(dir);
+    
+        gen_atlas_layers(atlas);
         
-    IF_DEBUG(
-        GL_H( glGenTextures(1, &atlas.img_tex_handle) );
-        
-        atlas.bind_image();
-        
-        GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) );
-        GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) );
-        GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE) );
-        GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE) );
-        
-        clear_image(atlas, 0);
-        
-        atlas.release();
-    )
         logf("Total Images: %lu\nArea Accum: %lu",
              atlas.num_images, area_accum);
     }
