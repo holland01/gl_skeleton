@@ -332,10 +332,11 @@ int main(int argc, const char * argv[])
     
     auto lset_images = [&atlasses, &folders, &path, &folder_index](void)
     {
-        if (folder_index < 0)
+        if (folder_index < 0) {
             folder_index = folders.size() - 1;
-        else if (folder_index >= folders.size())
+        } else if (folder_index >= folders.size()) {
             folder_index = 0;
+        }
         
         path = "./textures/" + folders[folder_index];
         

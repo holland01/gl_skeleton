@@ -101,6 +101,19 @@ namespace gl_atlas {
         va_end( arg );
     }
     
+    template <class numType>
+    numType next_power2(numType x)
+    {
+        x--;
+        x = x | x >> 1;
+        x = x | x >> 2;
+        x = x | x >> 4;
+        x = x | x >> 8;
+        x = x | x >> 16;
+        x++;
+        return x;
+    }
+    
 #ifdef DEBUG
     #define IF_DEBUG(expr) expr
 #else
@@ -139,10 +152,12 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
     static void alloc_blank_texture(size_t width, size_t height,
                                     uint32_t clear_val);
     
-    using image_filled_map_t = std::unordered_map<uint16_t, uint8_t>;
+    using image_fill_map_t = std::unordered_map<uint16_t, uint8_t>;
     
     struct atlas_t {    
         uint8_t desired_bpp = 4;
+        
+        uint32_t max_size = 1024;
         
         uint16_t width = 1024;
         uint16_t height = 1024;
@@ -213,8 +228,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             
             layer_tex_handles.resize(layer + 1, 0);
             
-            GL_H( glGenTextures((layer + 1) - alloc_start, 
-                                &layer_tex_handles[alloc_start]) );
+            GL_H( glGenTextures((layer + 1) - alloc_start, &layer_tex_handles[alloc_start]) );
             
             // Fill the layers we just allocated...
             for (size_t i = alloc_start; i < layer_tex_handles.size(); ++i) {
@@ -225,14 +239,12 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                 GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE) );
                 GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE) );
                 
-                alloc_blank_texture(width, height, 0xFF0000FF);
+                alloc_blank_texture(widths[layer], heights[layer], 0x00000000);
             }
         }
         
         void set_layer(uint16_t image, uint8_t layer)
         {
-            maybe_add_layer(layer);
-            
             logf("Switching layer to: %lu", layer);
             
             switch (layer)  {
@@ -298,22 +310,19 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             coords_y[image] = (coords_y[image] & ATLAS_COORDS_LAYER_MASK) | ((uint16_t) y);
         }
         
-        void fill_atlas_image(size_t x, size_t y, size_t image)
+        void fill_atlas_image(size_t image)
         {
             assert(desired_bpp == 4 && "GL RGBA is used...");
             
             GL_H( glTexSubImage2D(GL_TEXTURE_2D,
                                   0,
-                                  (GLsizei) x,
-                                  (GLsizei) y,
+                                  (GLsizei) origin_x(image),
+                                  (GLsizei) origin_y(image),
                                   dims_x[image],
                                   dims_y[image],
                                   GL_RGBA,
                                   GL_UNSIGNED_BYTE,
                                   &buffer_table[image][0]) );
-            
-            write_origins(x, y, image);
-            
         }
         
         void fill_image(size_t image)
@@ -428,7 +437,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
     {
         struct node_t;
         
-        using node_ptr_t = std::unique_ptr<node_t>;
+        using node_ptr_t = std::unique_ptr<node_t, void (*)(node_t*)>;
         using atlas_type_t = atlas_t;
             
         atlas_type_t& atlas;
@@ -446,7 +455,6 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
     
         struct node_t {
             bool region;
-            
             int32_t image;
             
             glm::ivec2 origin;
@@ -459,28 +467,28 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             // all nodes begin with an image index of -2, because -1 implies they are a region.
             node_t(void)
             :   region(false),
-                image(-2), 
+                image(-1), 
                 origin(0, 0), dims(0, 0),
                 left_child(nullptr), right_child(nullptr)
             {}
             
-            ~node_t(void) 
+            static void destroy(node_t* n)
             {
-                if (left_child)
-                    delete left_child;
-                
-                if (right_child)
-                    delete right_child;
+                if (n) {
+                    destroy(n->left_child);
+                    destroy(n->right_child);
+                    delete n;
+                }
             }
         };
         
         node_t* insert_node(node_t* node, uint16_t image, uint8_t dims_index)
         {
-            if (node->image == -1) {
+            if (node->region) {
                 node_t* n = insert_node(node->left_child, image, dims_index);
                 
                 if (n) {
-                    node->leftChild = n;
+                    node->left_child = n;
                     return node;
                 }
                 
@@ -497,8 +505,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                 
                 glm::ivec2 image_dims(atlas.dims_x[image], atlas.dims_y[image]);
                 
-                if (node->dims.x < image_dims.x 
-                    || node->dims.y < image_dims.y)
+                if (node->dims.x < image_dims.x || node->dims.y < image_dims.y)
                     return nullptr;
                 
                 if (node->dims.x == image_dims.x 
@@ -510,14 +517,14 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                         layer_dims[dims_index].x = node->origin.x + image_dims.x;
                     
                     if ((node->origin.y + image_dims.y) > layer_dims[dims_index].y)
-                        layer_dims[dims_index s].y = node->origin.y + image_dims.y;
+                        layer_dims[dims_index].y = node->origin.y + image_dims.y;
                     
-                    atlas.write_origins(node->origin.x, node->origin.y, node->image);
+                    atlas.write_origins(node->image, node->origin.x, node->origin.y);
                     
                     return node;
                 }
                 
-                node->image = -1;
+                node->region = true;
                 
                 uint16_t dx = node->dims.x - image_dims.x;
                 uint16_t dy = node->dims.y - image_dims.y;
@@ -570,7 +577,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         
         bool insert(uint16_t image, uint16_t root)
         {
-            node_t* res = insert_node(roots[root].get(), image);
+            node_t* res = insert_node(roots[root].get(), image, root);
             
             return !!res;
         }    
@@ -581,8 +588,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         // so it's fine for us to not cache the results..
         const glm::ivec3& dims(bool& is_sorted_atlas) const
         {
-            glm::vec2 unsorted(layer_dims[0]));
-            
+            glm::vec2 unsorted(layer_dims[0]);
             glm::vec2 sorted(layer_dims[1]);
             
             if (layer_dims[0][2] == layer_dims[1][2]) {
@@ -601,11 +607,17 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             }
         }
         
-        gen_layer_bsp(atlas_type_t& atlas_, std::array<image_fill_map_t, 2>& image_check)
-        :   atlas(atlas_)
+        gen_layer_bsp(atlas_type_t& atlas_, std::array<image_fill_map_t, 2>& image_check, uint32_t layer)
+            :   atlas(atlas_),
+                roots(
+                    {{
+                        node_ptr_t(new node_t(), node_t::destroy),
+                        node_ptr_t(new node_t(), node_t::destroy)
+                    }}
+                )
         {
             for (node_ptr_t& root: roots) {
-                root.reset(new node_t());
+                root->dims = glm::ivec2(atlas_.widths[layer], atlas_.heights[layer]);
             }
             
             // unsorted
@@ -617,7 +629,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                     }
                 }
             }
-            
+            /*
             // sorted
             {
                 std::vector<uint16_t> sorted(image_check[1].size(), 0);
@@ -642,8 +654,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                     }
                 }
             }
-            
-            logf("Fill Result: %i/%i\n", atlas.filled.size(), atlas.num_images);
+             */
         }
     };
     
@@ -853,7 +864,50 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         
         atlas.release();
         
-        gen_layer_bsp<MAX_ATLAS_LAYERS> placed(atlas, sort);
+        {
+            image_fill_map_t global_unfill;
+            for (uint16_t i = 0; i < atlas.num_images; ++i) {
+                global_unfill[i];
+            }
+            
+            uint8_t layer = 0;
+            
+            while (!global_unfill.empty()) {
+                std::array<image_fill_map_t, 2> local_fill;
+                local_fill[0].insert(global_unfill.begin(), global_unfill.end());
+                local_fill[1].insert(global_unfill.begin(), global_unfill.end());
+                
+                
+                uint32_t best_map;
+                {
+                    gen_layer_bsp placed(atlas, local_fill, layer);
+                    
+                    bool sorted = false;
+                    const glm::ivec3& dims = placed.dims(sorted);
+                
+                    best_map = sorted ? 1 : 0;
+                    
+                    atlas.widths[layer] = next_power2(dims[0]);
+                    atlas.heights[layer] = next_power2(dims[1]);
+                }
+            
+                atlas.maybe_add_layer(layer);
+                
+                atlas.bind(layer);
+
+                for (auto& image: local_fill[best_map]) {
+                    if (image.second) {
+                        atlas.set_layer(image.first, layer);
+                        atlas.fill_atlas_image(image.first);
+                        global_unfill.erase(image.first);
+                    }
+                }
+                
+                atlas.release();
+                
+                layer++;
+            }
+        }
         
         logf("Total Images: %lu\nArea Accum: %lu",
              atlas.num_images, area_accum);
