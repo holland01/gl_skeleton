@@ -517,8 +517,6 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         
     public:
         
-        // this isn't meant to be called very frequently,
-        // so it's fine for us to not cache the results..
         const glm::ivec3& dims(void) const
         {
             return layer_dims;
