@@ -2,23 +2,38 @@
 #define __GL_ATLAS_H__
 
 /*
- ░░░░░░░░░░░░░▄███▄▄▄░░░░░░░
- ░░░░░░░░░▄▄▄██▀▀▀▀███▄░░░░░
- ░░░░░░░▄▀▀░░░░░░░░░░░▀█░░░░
- ░░░░▄▄▀░░░░░░░░░░░░░░░▀█░░░
- ░░░█░░░░░▀▄░░▄▀░░░░░░░░█░░░
- ░░░▐██▄░░▀▄▀▀▄▀░░▄██▀░▐▌░░░
- ░░░█▀█░▀░░░▀▀░░░▀░█▀░░▐▌░░░
- ░░░█░░▀▐░░░░░░░░▌▀░░░░░█░░░
- ░░░█░░░░░░░░░░░░░░░░░░░█░░░
- ░░░█░░▀▄░░░░▄▀░░░░░░░░█░░░
- ░░░░█░░░░░░░░░░░▄▄░░░░█░░░░
- ░░░░░█▀██▀▀▀▀██▀░░░░░░█░░░░
- ░░░░░█░░▀████▀░░░░░░░█░░░░░ ░
- ░░░░░█░░░░░░░░░░░░▄█░░░░░░
- ░░░░░░░██░░░░░█▄▄▀▀░█░░░░░░
- ░░░░░░░░▀▀█▀▀▀▀░░░░░░█░░░░░
- ░░░░░░░░░█░░░░░░░░░░░░█░░░░
+ ───────────────▄████████▄────────
+ ──────────────██▒▒▒▒▒▒▒▒██───────
+ ─────────────██▒▒▒▒▒▒▒▒▒██───────
+ ────────────██▒▒▒▒▒▒▒▒▒▒██───────
+ ───────────██▒▒▒▒▒▒▒▒▒██▀────────
+ ──────────██▒▒▒▒▒▒▒▒▒▒██─────────
+ ─────────██▒▒▒▒▒▒▒▒▒▒▒██─────────
+ ────────██▒████▒████▒▒██─────────
+ ────────██▒▒▒▒▒▒▒▒▒▒▒▒██─────────
+ ────────██▒────▒▒────▒██─────────
+ ────────██▒██──▒▒██──▒██─────────
+ ────────██▒────▒▒────▒██─────────
+ ────────██▒▒▒▒▒▒▒▒▒▒▒▒██─────────
+ ───────██▒▒▒████████▒▒▒▒██───────
+ ─────██▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒██─────
+ ───██▒▒██▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒██▒▒██───
+ ─██▒▒▒▒██▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒██▒▒▒▒██─
+ █▒▒▒▒██▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒██▒▒▒▒█
+ █▒▒▒▒██▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒██▒▒▒▒█
+ █▒▒████▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒████▒▒█
+ ▀████▒▒▒▒▒▒▒▒▒▓▓▓▓▒▒▒▒▒▒▒▒▒▒████▀
+ ──█▌▌▌▌▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▌▌▌███──
+ ───█▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌█────
+ ───█▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌█────
+ ────▀█▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌▌██▀─────
+ ─────█▌▌▌▌▌▌████████▌▌▌▌▌██──────
+ ──────██▒▒██────────██▒▒██───────
+ ──────▀████▀────────▀████▀───────
+ 
+ If you're not using GL ES 2.0 you're wasting your time with this:
+ just use GL_TEXTURE_2D_ARRAY, wash your hands, and be done with it :D
+ 
  */
 
 #include <stdio.h>
@@ -138,18 +153,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
     // atlas generation-specific classes/functions.
     //------------------------------------------------------------------------------------
     
-    // When we have multiple atlasses, we use layers...
-    // If a given coord _doesn't_ have either of the two bits 
-    // set, then it's a part of the first layer, layer 0.
-    
-    // The layer bits are stored in bits 14 and 15 of the x and y origins for a given image.
-    // this gives us a maximum of 5 layers including the first one.
-    
-    enum {
-        ATLAS_COORDS_LAYER_1 = 1 << 14,
-        ATLAS_COORDS_LAYER_2 = 1 << 15,
-        ATLAS_COORDS_LAYER_MASK = ATLAS_COORDS_LAYER_1 | ATLAS_COORDS_LAYER_2
-    };
+    // When we have multiple atlasses for a single set of images, we use layers.
     
     static void alloc_blank_texture(size_t width, size_t height,
                                     uint32_t clear_val);
@@ -161,8 +165,10 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         
         std::vector<GLuint> layer_tex_handles;
         
-        std::array<uint16_t, 5> widths;
-        std::array<uint16_t, 5> heights;
+        uint8_t max_layers;
+        
+        std::vector<uint16_t> widths;
+        std::vector<uint16_t> heights;
         
         std::vector<uint16_t> dims_x;
         std::vector<uint16_t> dims_y;
@@ -170,107 +176,62 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         std::vector<uint16_t> coords_x;
         std::vector<uint16_t> coords_y;
         
+        std::vector<uint8_t> layers;
+        
         std::vector<std::vector<uint8_t>> buffer_table;
         std::vector<std::string> filenames;
         
+        uint16_t calc_layer_mask(void) const
+        {
+            uint8_t xx = 1 << (16 - max_layers); 
+            
+            return (1 << (16 - max_layers));
+        }
+        
         uint16_t origin_x(uint16_t image) const 
         {
-            return coords_x[image] & (~ATLAS_COORDS_LAYER_MASK);
+            return coords_x[image];
         }
         
         uint16_t origin_y(uint16_t image) const 
         {
-            return coords_y[image] & (~ATLAS_COORDS_LAYER_MASK);
+            return coords_y[image];
         }
         
         uint8_t layer(uint16_t image) const
         {        
-            auto fetch_coord_layer = [this, &image](uint16_t coord) -> uint16_t {
-                switch (coord & ATLAS_COORDS_LAYER_MASK) {
-                    case 0: return 0;
-                    case ATLAS_COORDS_LAYER_1: return 1;
-                    case ATLAS_COORDS_LAYER_2: return 2;
-                        
-                        // will fire if both bits are set
-                    default:
-                        logf("Layer bits for image %lu are invalid; image is for file %s.\n", 
-                             image, 
-                             filenames[image].c_str());
-                        assert(false);
-                        break;
-                }
-            };
-            
-            uint16_t ret = fetch_coord_layer(coords_x[image]);
-            
-            if (ret) {
-                ret += fetch_coord_layer(coords_y[image]);
-            }
-            
-            return ret;        
+            assert(image < layers.size());
+            assert(layers[image] != 0xFF);
+            return layers[image];      
         }
     
-        void maybe_add_layer(uint32_t layer)
+        void push_layer(uint16_t width, uint16_t height)
         {
-            if (layer_tex_handles.size() > layer)
-                return;
+            size_t index = layer_tex_handles.size();
             
-            uint32_t alloc_start = layer_tex_handles.size();
+            layer_tex_handles.push_back(0);
+            widths.push_back(width);
+            heights.push_back(height);
             
-            layer_tex_handles.resize(layer + 1, 0);
-            
-            GL_H( glGenTextures((layer + 1) - alloc_start, &layer_tex_handles[alloc_start]) );
+            GL_H( glGenTextures(1, &layer_tex_handles[index]) );
             
             // Fill the layers we just allocated...
-            for (size_t i = alloc_start; i < layer_tex_handles.size(); ++i) {
-                bind(i);
-                
-                GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) );
-                GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) );
-                GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE) );
-                GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE) );
-                
-                alloc_blank_texture(widths[layer], heights[layer], 0x00000000);
-            }
+            bind(index);
+            
+            GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) );
+            GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) );
+            GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE) );
+            GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE) );
+            
+            alloc_blank_texture(widths[index], heights[index], 0x00);
         }
         
         void set_layer(uint16_t image, uint8_t layer)
         {
-            logf("Switching layer to: %lu", layer);
+            if (layers.size() != num_images)
+                layers.resize(num_images, 0xFF);
             
-            switch (layer)  {
-                case 0:
-                    coords_x[image] = origin_x(image); // implicit layer bits clear
-                    coords_y[image] = origin_y(image);
-                    break;
-                    
-                case 1:
-                    coords_x[image] |= ATLAS_COORDS_LAYER_1;
-                    coords_y[image] = origin_y(image);
-                    break;
-                    
-                case 2:
-                    coords_x[image] |= ATLAS_COORDS_LAYER_2;
-                    coords_y[image] = origin_y(image);
-                    break;
-                    
-                case 3:
-                    coords_x[image] |= ATLAS_COORDS_LAYER_2;
-                    coords_y[image] |= ATLAS_COORDS_LAYER_1;
-                    break;
-                    
-                case 4:
-                    coords_x[image] |= ATLAS_COORDS_LAYER_2;
-                    coords_y[image] |= ATLAS_COORDS_LAYER_2;
-                    break;
-                    
-                default:
-                    logf("Layer bits for image %lu are invalid; image is for file %s.\n", 
-                         image, 
-                         filenames[image].c_str());
-                    assert(false);
-                    break;
-            }
+            layers[image] = layer;            
         }
         
         void bind(uint8_t layer) const
@@ -288,12 +249,12 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             if (coords_x.size() != num_images)
                 coords_x.resize(num_images, 0);
             
-            coords_x[image] = (coords_x[image] & ATLAS_COORDS_LAYER_MASK) | ((uint16_t) x);
+            coords_x[image] = x;
             
             if (coords_y.size() != num_images)
                 coords_y.resize(num_images, 0);
             
-            coords_y[image] = (coords_y[image] & ATLAS_COORDS_LAYER_MASK) | ((uint16_t) y);
+            coords_y[image] = y;
         }
         
         void fill_atlas_image(size_t image)
@@ -333,7 +294,8 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
                         
             num_images = 0;
             
-            
+            widths.clear();
+            heights.clear();
             dims_x.clear();
             dims_y.clear();
             coords_x.clear();
@@ -522,13 +484,26 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             return layer_dims;
         }
         
-        gen_layer_bsp(atlas_type_t& atlas_, image_fill_map_t& image_check, uint32_t layer)
+        gen_layer_bsp(atlas_type_t& atlas_, image_fill_map_t& image_check, uint32_t area_accum)
             :   atlas(atlas_),
                 root(new node_t(), node_t::destroy)
         {
-            root->dims = glm::ivec2(atlas_.widths[layer], 
-                                    atlas_.heights[layer]);
+            // Setup some upper bounds for the width/height values
+            {
+                GLint max_dims;
+                GL_H( glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_dims) );
+                                
+                uint32_t root_area_accumf = next_power2((uint32_t) glm::sqrt((float) area_accum));
+                
+                if (max_dims > root_area_accumf)
+                    max_dims = (GLint) root_area_accumf;
+                    
+                root->dims = glm::ivec2(max_dims, max_dims);
 
+                
+               // puts("");
+            }
+            
             std::vector<uint16_t> sorted(image_check.size(), 0);
             
             uint16_t i = 0;
@@ -627,7 +602,7 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
     // gen
     //------------------------------------------------------------------------------------
     
-    void gen_atlas_layers(atlas_t& atlas)
+    void gen_atlas_layers(atlas_t& atlas, uint32_t area_accum)
     {
         image_fill_map_t global_unfill;
         for (uint16_t i = 0; i < atlas.num_images; ++i) {
@@ -642,19 +617,17 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
             local_fill.insert(global_unfill.begin(), 
                               global_unfill.end());
             
-            uint32_t best_map;
+            uint16_t w, h;
             {
-                gen_layer_bsp placed(atlas, local_fill, layer);
+                gen_layer_bsp placed(atlas, local_fill, area_accum);
                 
                 const glm::ivec3& dims = placed.dims();
                 
-                best_map = 1;
-                
-                atlas.widths[layer] = next_power2(dims[0]);
-                atlas.heights[layer] = next_power2(dims[1]);
+                w = next_power2(dims[0]);
+                h = next_power2(dims[1]);
             }
             
-            atlas.maybe_add_layer(layer);
+            atlas.push_layer(w, h);
             
             atlas.bind(layer);
             
@@ -691,15 +664,8 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         
         atlas.free_memory();
         
-        // Setup some upper bounds for the width/height values
-        {
-            GLint max_dims;
-            GL_H( glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_dims) );
-            
-            atlas.widths.fill((uint16_t) max_dims);
-            atlas.heights.fill((uint16_t) max_dims);
-        }
-        
+        uint8_t maxLayers = 0xFF;
+    
         size_t area_accum = 0;
         
         while (!!(ent = readdir(dir))) {
@@ -749,8 +715,8 @@ exit_on_gl_error(__LINE__, __FUNCTION__, #expr); \
         }
         
         closedir(dir);
-    
-        gen_atlas_layers(atlas);
+            
+        gen_atlas_layers(atlas, area_accum);
         
         logf("Total Images: %lu\nArea Accum: %lu",
              atlas.num_images, area_accum);
