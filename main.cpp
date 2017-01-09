@@ -1,3 +1,4 @@
+#define GL_ATLAS_GLEW
 #define GL_ATLAS_MAIN
 #define GL_ATLAS_EXTRAS
 
@@ -20,13 +21,13 @@ static const char* GLSL_VERTEX_SHADER = SHADER(
                                                layout(location = 0) in vec3 position;
                                                layout(location = 1) in vec2 st;
                                                layout(location = 2) in vec4 color;
-                                               
+
                                                uniform mat4 modelView;
                                                uniform mat4 projection;
-                                               
+
                                                out vec4 vary_Color;
                                                out vec2 vary_St;
-                                               
+
                                                void main(void) {
                                                    gl_Position = projection * modelView * vec4(position, 1.0);
                                                    vary_Color = color;
@@ -38,9 +39,9 @@ static const char* GLSL_FRAGMENT_SHADER = SHADER(
                                                  in vec4 vary_Color;
                                                  in vec2 vary_St;
                                                  out vec4 out_Fragment;
-                                                 
+
                                                  uniform sampler2D sampler0;
-                                                 
+
                                                  void main(void) {
                                                      out_Fragment = vary_Color * vec4(texture(sampler0, vary_St).rgb, 1.0);
                                                  }
@@ -52,74 +53,74 @@ static GLuint compile_shader(const char* shader_src, GLenum shader_type)
     GL_H( shader = glCreateShader(shader_type) );
     GL_H( glShaderSource(shader, 1, &shader_src, NULL) );
     GL_H( glCompileShader(shader) );
-    
+
     GLint compile_success;
     GL_H( glGetShaderiv(shader, GL_COMPILE_STATUS, &compile_success) );
-    
+
     if (compile_success == GL_FALSE) {
         GLint info_log_len;
         GL_H( glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &info_log_len) );
-        
+
         std::vector<char> log_msg(info_log_len + 1, 0);
         GL_H( glGetShaderInfoLog(shader, (GLsizei)(log_msg.size() - 1),
                                  NULL, &log_msg[0]) );
-        
+
         logf("COMPILE ERROR: %s\n\nSOURCE\n\n---------------\n%s\n--------------",
              &log_msg[0], shader_src);
-        
+
         return 0;
     }
-    
+
     return shader;
 }
 
 static GLuint link_program(const char* vertex_src, const char* fragment_src)
 {
     GLuint vertex, fragment;
-    
+
     vertex = compile_shader(vertex_src, GL_VERTEX_SHADER);
     if (!vertex)
         goto fail;
-    
+
     fragment = compile_shader(fragment_src, GL_FRAGMENT_SHADER);
     if (!fragment)
         goto fail;
-    
+
     {
         GLuint program;
         GL_H( program = glCreateProgram() );
-        
+
         GL_H( glAttachShader(program, vertex) );
         GL_H( glAttachShader(program, fragment) );
-        
+
         GL_H( glLinkProgram(program) );
-        
+
         GL_H( glDetachShader(program, vertex) );
         GL_H( glDetachShader(program, fragment) );
-        
+
         GL_H( glDeleteShader(vertex) );
         GL_H( glDeleteShader(fragment) );
-        
+
         GLint link_success;
         GL_H( glGetProgramiv(program, GL_LINK_STATUS, &link_success) );
-        
+
         if (link_success == GL_FALSE) {
             GLint info_log_len;
             GL_H( glGetProgramiv(program, GL_INFO_LOG_LENGTH, &info_log_len) );
-            
+
             std::vector<char> log_msg(info_log_len + 1, 0);
             GL_H( glGetProgramInfoLog(program, (GLsizei)(log_msg.size() - 1),
                                       NULL, &log_msg[0]) );
-            
+
             logf("LINK ERROR:\n Program ID: %lu\n Error: %s",
                  program, &log_msg[0]);
-            
+
             goto fail;
         }
-        
+
         return program;
     }
-    
+
 fail:
     g_running = false;
     return 0;
@@ -190,14 +191,14 @@ struct vertex_t {
 };
 
 template <class clampType>
-static clampType clamp_circ(clampType x, clampType min, clampType max) 
+static clampType clamp_circ(clampType x, clampType min, clampType max)
 {
     if (x < min) {
         x = max;
     } else if (x >= max) {
         x = min;
     }
-    
+
     return x;
 }
 
@@ -278,9 +279,9 @@ int main(int argc, const char * argv[])
     camera.walk(-3.0f);
 
     const float CAMERA_STEP = 0.05f;
-    
+
     int16_t curr_image = 0;
-    
+
     std::vector<std::string> folders = {{
         "aedm7",
         "assaultQ",
@@ -321,15 +322,15 @@ int main(int argc, const char * argv[])
         "water",
         "xlab_doorQ"
     }};
-    
+
     int32_t folder_index = 4;
-    
+
     int16_t display_layer = 0;
-    
+
     std::string path;
-    
+
     std::array<atlas_t, 2> atlasses;
-    
+
     auto lset_images = [&atlasses, &folders, &path, &folder_index](void)
     {
         if (folder_index < 0) {
@@ -337,34 +338,36 @@ int main(int argc, const char * argv[])
         } else if (folder_index >= folders.size()) {
             folder_index = 0;
         }
-        
+
         path = "./textures/" + folders[folder_index];
-        
-        make_atlas(atlasses[0], path, true);
-        
+
+        make_atlas_from_dir(atlasses[0], path);
+
         GL_H( glActiveTexture(GL_TEXTURE0) );
-        
+
         std::stringstream ss;
         uint16_t i = 0;
         for (const std::string& fname: atlasses[0].filenames) {
             ss << SS_INDEX(i) << fname << "\n";
             ++i;
         }
-        
+
         logf("Image Filenames:\n%s", ss.str().c_str());
     };
-    
+
     lset_images();
-    
+
     while (!KEY_PRESS(GLFW_KEY_ESCAPE)
            && !glfwWindowShouldClose(window)
            && g_running) {
 
         GL_H( glUniformMatrix4fv(glGetUniformLocation(program, "modelView"),
-                                 1, GL_FALSE, glm::value_ptr(camera.model_to_view())) );
+                                 1, GL_FALSE,
+								 glm::value_ptr(camera.model_to_view())) );
 
         GL_H( glUniformMatrix4fv(glGetUniformLocation(program, "projection"),
-                                 1, GL_FALSE, glm::value_ptr(camera.view_to_clip())) );
+                                 1, GL_FALSE,
+								 glm::value_ptr(camera.view_to_clip())) );
 
         GL_H( glClear(GL_COLOR_BUFFER_BIT) );
         GL_H( glDrawArrays(GL_TRIANGLE_STRIP, 0, 4) );
@@ -375,12 +378,12 @@ int main(int argc, const char * argv[])
         if (KEY_PRESS(GLFW_KEY_LEFT_BRACKET)) {
             folder_index--;
             lset_images();
-        } 
+        }
         else if (KEY_PRESS(GLFW_KEY_RIGHT_BRACKET)) {
             folder_index++;
             lset_images();
         }
-        
+
         if (KEY_PRESS(GLFW_KEY_UP))
             atlas_view = !atlas_view;
 
@@ -390,17 +393,17 @@ int main(int argc, const char * argv[])
         if (KEY_PRESS(GLFW_KEY_D)) camera.strafe(CAMERA_STEP);
         if (KEY_PRESS(GLFW_KEY_SPACE)) camera.raise(CAMERA_STEP);
         if (KEY_PRESS(GLFW_KEY_LEFT_SHIFT)) camera.raise(-CAMERA_STEP);
-        
+
         if (KEY_PRESS(GLFW_KEY_M)) {
             display_layer = (display_layer + 1) % atlasses[atlas_view_index].layer_tex_handles.size();
         }
-        
+
         if (KEY_PRESS(GLFW_KEY_N)) {
             display_layer--;
             if (display_layer < 0)
                 display_layer = atlasses[atlas_view_index].layer_tex_handles.size() - 1;
         }
-        
+
         // mod is there in case we only decide to store one atlas
         // in the array, for whatever reason
         atlasses[atlas_view_index & 0x0].bind(display_layer);
@@ -408,9 +411,9 @@ int main(int argc, const char * argv[])
         if (KEY_PRESS(GLFW_KEY_RIGHT)) {
             atlas_view_index ^= 0x1;
         }
-        
+
         std::stringstream ss;
-        
+
         switch (atlas_view_index) {
             case 0:
                 ss << "(sorted)";
@@ -422,20 +425,20 @@ int main(int argc, const char * argv[])
                 ss << "(unknown)";
                 break;
         }
-        
+
         ss << ": " << path << "; layer " << display_layer
-        << "; dims " << glm::to_string(glm::ivec2(atlasses[atlas_view_index].widths[display_layer], 
+        << "; dims " << glm::to_string(glm::ivec2(atlasses[atlas_view_index].widths[display_layer],
                                                   atlasses[atlas_view_index].heights[display_layer]));
-            
+
             glfwSetWindowTitle(window, ss.str().c_str());
 
-                
+
         std::this_thread::sleep_for(std::chrono::nanoseconds(ONE_MILLISECOND * 100));
-        
+
     }
 
 fin:
-        
+
     GL_H( glUseProgram(0) );
     GL_H( glDeleteProgram(program) );
 
