@@ -31,9 +31,10 @@
  ──────██▒▒██────────██▒▒██───────
  ──────▀████▀────────▀████▀───────
 
- If you're not using GL ES 2.0 you're probably wasting your time with this:
- just use GL_TEXTURE_2D_ARRAY, wash your hands, and be done with it :D
-
+ If you're not using GL ES 2.0 or old school
+ GL 2.x you're probably wasting your time with this:
+ just use GL_TEXTURE_2D_ARRAY, wash your hands,
+ and be done with it :D
  */
 
 #include <stdio.h>
@@ -51,16 +52,22 @@
 #include <utility>
 #include <thread>
 
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.c"
+#include "stb_image.h"
+
+#define GL_ATLAS_TEX_FORMAT GL_RGBA
 
 #ifdef GL_ATLAS_GLEW
 	#include <GL/glew.h>
 	#include <GLFW/glfw3.h>
-#elif defined(GL_ATLAS_EMSCRIPTEN)
+	#define GL_ATLAS_INTERNAL_TEX_FORMAT GL_RGBA8
+#elif defined(GL_ATLAS_EGL)
 	#include <GLES2/gl2.h>
 	#include <GLES2/gl2ext.h>
 	#include <EGL/egl.h>
+	#define GL_ATLAS_INTERNAL_TEX_FORMAT GL_RGBA
+#else
+	#error "define either GL_ATLAS_GLEW or GL_ATLAS_EGL to " \
+		"choose header implementation"
 #endif
 
 #include <glm/glm.hpp>
@@ -80,12 +87,23 @@
 //------------------------------------------------------------------------------------
 // logging and GL error handling
 //------------------------------------------------------------------------------------
+#define ga_inline inline
 
-namespace gl_atlas {
+namespace gla {
+
+	static ga_inline void atlas_error_exit(void)
+	{
+#ifdef GL_ATLAS_MAIN
+		g_running = false;
+#else
+		exit(1);
+#endif
+	}
 
 	static std::vector<std::string> g_gl_err_msg_cache;
 
-	static void exit_on_gl_error(int line, const char* func, const char* expr)
+	static ga_inline void exit_on_gl_error(int line, const char* func,
+		const char* expr)
 	{
 		GLenum err = glGetError();
 
@@ -93,24 +111,38 @@ namespace gl_atlas {
 			char msg[256];
 			memset(msg, 0, sizeof(msg));
 
-			sprintf(&msg[0], "GL ERROR (%x) in %s@%i [%s]: %s\n", err, func, line, expr,
-					(const char* )gluErrorString(err));
+#ifdef GL_ATLAS_GLEW
+			sprintf(
+				&msg[0],
+				"GL_ATLAS_ERROR (%x) in %s@%i [%s]: %s\n",
+				err,
+				func,
+				line,
+				expr,
+				(const char* )gluErrorString(err));
+#else // No error string implementation at the moment - some day...
+			sprintf(
+				&msg[0],
+				"GL_ATLAS_ERROR (%x) in %s@%i [%s]\n",
+				err,
+				func,
+				line,
+				expr);
+#endif
 
 			std::string smsg(msg);
-			if (std::find(g_gl_err_msg_cache.begin(), g_gl_err_msg_cache.end(), smsg) ==
-				g_gl_err_msg_cache.end()) {
+			if (std::find(g_gl_err_msg_cache.begin(), g_gl_err_msg_cache.end(), smsg)
+				== g_gl_err_msg_cache.end()) {
 				printf("%s", smsg.c_str());
 				g_gl_err_msg_cache.push_back(smsg);
 			}
-#ifdef GL_ATLAS_MAIN // used for internal test client
-			g_running = false;
-#else
-			exit(1);
-#endif
+
+			atlas_error_exit();
 		}
 	}
 
-	void logf_impl( int line, const char* func, const char* fmt, ... )
+	static ga_inline void logf_impl( int line, const char* func,
+		const char* fmt, ... )
 	{
 		va_list arg;
 
@@ -137,13 +169,9 @@ namespace gl_atlas {
 	#define GL_H(expr) expr
 #endif
 
-#define logf( ... ) logf_impl(__LINE__, __FUNCTION__, __VA_ARGS__)
-
-#define ga_inline inline
+#define gla_logf( ... ) logf_impl(__LINE__, __FUNCTION__, __VA_ARGS__)
 
 #define DESIRED_BPP 4
-
-
 
 //-------------------------------------------------------------------------
 // atlas generation-specific classes/functions.
@@ -171,12 +199,18 @@ namespace gl_atlas {
 
 	using image_fill_map_t = std::unordered_map<uint16_t, uint8_t>;
 
+	struct atlas_image_info_t {
+		uint8_t 	layer;
+		glm::vec2 	coords;
+		glm::vec2 	inverse_layer_dims;
+	};
+
 	struct atlas_t {
-		uint32_t num_images = 0;
+		uint32_t num_images;
 
-		std::vector<GLuint> layer_tex_handles;
+		uint32_t area_accum;
 
-		uint8_t max_layers;
+		std::vector<uint8_t> layers;
 
 		std::vector<uint16_t> widths;
 		std::vector<uint16_t> heights;
@@ -187,17 +221,13 @@ namespace gl_atlas {
 		std::vector<uint16_t> coords_x;
 		std::vector<uint16_t> coords_y;
 
-		std::vector<uint8_t> layers;
+		std::vector<GLuint> layer_tex_handles;
 
 		std::vector<std::vector<uint8_t>> buffer_table;
-		std::vector<std::string> filenames;
 
-		uint16_t calc_layer_mask(void) const
-		{
-			uint8_t xx = 1 << (16 - max_layers);
+		std::vector<std::string> filenames; // optional
 
-			return (1 << (16 - max_layers));
-		}
+		std::unordered_map<size_t, uint16_t> key_map;	// optional
 
 		uint16_t origin_x(uint16_t image) const
 		{
@@ -216,6 +246,22 @@ namespace gl_atlas {
 			return layers[image];
 		}
 
+		atlas_image_info_t image_info(uint16_t image) const
+		{
+			uint8_t L = layer(image);
+
+			atlas_image_info_t img {
+				L,
+				glm::vec2(origin_x(image), origin_y(image)),
+				glm::vec2(
+					1.0f / static_cast<float>(widths[L]),
+					1.0f / static_cast<float>(heights[L])
+				)
+			};
+
+			return img;
+		}
+
 		void push_layer(uint16_t width, uint16_t height)
 		{
 			size_t index = layer_tex_handles.size();
@@ -228,10 +274,14 @@ namespace gl_atlas {
 
 			bind(index);
 
-			GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) );
-			GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) );
-			GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE) );
-			GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE) );
+			GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+				GL_LINEAR) );
+			GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+				GL_LINEAR) );
+			GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
+				GL_CLAMP_TO_EDGE) );
+			GL_H( glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+				GL_CLAMP_TO_EDGE) );
 
 			alloc_blank_texture(widths[index], heights[index], 0x00);
 		}
@@ -249,9 +299,21 @@ namespace gl_atlas {
 			GL_H( glBindTexture(GL_TEXTURE_2D, layer_tex_handles[layer]) );
 		}
 
+		void bind_to_active_slot(uint8_t layer, int offset) const
+		{
+			GL_H( glActiveTexture(GL_TEXTURE0 + offset) );
+			bind(layer);
+		}
+
 		void release(void) const
 		{
 			GL_H( glBindTexture(GL_TEXTURE_2D, 0) );
+		}
+
+		void release_from_active_slot(int offset) const
+		{
+			GL_H( glActiveTexture(GL_TEXTURE0 + offset) );
+			release();
 		}
 
 		void write_origins(uint16_t image, uint16_t x, uint16_t y)
@@ -275,9 +337,19 @@ namespace gl_atlas {
 								  (GLsizei) origin_y(image),
 								  dims_x[image],
 								  dims_y[image],
-								  GL_RGBA,
+								  GL_ATLAS_TEX_FORMAT,
 								  GL_UNSIGNED_BYTE,
 								  &buffer_table[image][0]) );
+		}
+
+		uint16_t key_image(size_t key) const
+		{
+			return key_map.at(key);
+		}
+
+		void map_key_to_image(size_t key, uint16_t image)
+		{
+			key_map[key] = image;
 		}
 
 		void free_memory(void)
@@ -291,18 +363,21 @@ namespace gl_atlas {
 				// until that item is unbound
 
 				bool bound = false;
-				for (GLuint handle = 0; handle < layer_tex_handles.size() && !bound && curr_bound_tex; ++handle) {
-					bound = curr_bound_tex == layer_tex_handles[handle];
+				for (GLuint handle = 0; handle < layer_tex_handles.size()
+					&& !bound && curr_bound_tex; ++handle) {
+					bound = (GLuint)curr_bound_tex == layer_tex_handles[handle];
 				}
 
 				if (bound) {
 					GL_H( glBindTexture(GL_TEXTURE_2D, 0) );
 				}
 
-				GL_H( glDeleteTextures(layer_tex_handles.size(), &layer_tex_handles[0]) );
+				GL_H( glDeleteTextures(layer_tex_handles.size(),
+					&layer_tex_handles[0]) );
 			}
 
 			num_images = 0;
+			area_accum = 0;
 
 			widths.clear();
 			heights.clear();
@@ -313,6 +388,7 @@ namespace gl_atlas {
 			buffer_table.clear();
 			filenames.clear();
 
+			layers.clear();
 			layer_tex_handles.clear();
 		}
 
@@ -320,14 +396,19 @@ namespace gl_atlas {
 		{
 			free_memory();
 		}
-	};
 
+		atlas_t(void)
+			: 	num_images(0),
+				area_accum(0)
+		{}
+	};
 
 	//------------------
 	// gen_layer_bsp
 	//
-	// generates a layer (think of "layer" in this sense as just a separate atlas texture belonging to a whole image)
-	// for a group of images. The core algorithm is based on 2D BSP generation.
+	// generates a layer (think of "layer" in this sense as just a texture
+	// representing a portion for a set of a group of images ).
+	// The core algorithm is based on 2D BSP generation.
 	//
 	// it assesses whether or not sorted images for this layer
 	// actually save space and how large this layer actually needs to be.
@@ -337,7 +418,7 @@ namespace gl_atlas {
 	// of images which are of the same dimensions, then there will be a lot of unused
 	// space.
 	//
-	// source of BSP algol is from here:
+	// idea behind BSP algol is from here:
 	// http://gamedev.stackexchange.com/a/34193
 	//------------------
 
@@ -425,7 +506,8 @@ namespace gl_atlas {
 					if ((node->origin.y + image_dims.y) > layer_dims.y)
 						layer_dims.y = node->origin.y + image_dims.y;
 
-					atlas.write_origins(node->image, node->origin.x, node->origin.y);
+					atlas.write_origins(node->image, node->origin.x,
+						node->origin.y);
 
 					return node;
 				}
@@ -495,7 +577,7 @@ namespace gl_atlas {
 			return layer_dims;
 		}
 
-		gen_layer_bsp(atlas_type_t& atlas_, image_fill_map_t& image_check, uint32_t area_accum)
+		gen_layer_bsp(atlas_type_t& atlas_, image_fill_map_t& image_check)
 			:   atlas(atlas_),
 				root(new node_t(), node_t::destroy)
 		{
@@ -505,9 +587,9 @@ namespace gl_atlas {
 				GL_H( glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_dims) );
 
 				uint32_t root_area_accumf =
-					next_power2((uint32_t) glm::sqrt((float) area_accum));
+					next_power2((uint32_t) glm::sqrt((float) atlas.area_accum));
 
-				if (max_dims > root_area_accumf)
+				if ((uint32_t) max_dims > root_area_accumf)
 					max_dims = (GLint) root_area_accumf;
 
 				root->dims = glm::ivec2(max_dims, max_dims);
@@ -525,7 +607,6 @@ namespace gl_atlas {
 				if (atlas.dims_x[a] == atlas.dims_x[b]) {
 					return atlas.dims_y[a] > atlas.dims_y[b];
 				}
-
 				return atlas.dims_x[a] > atlas.dims_x[b];
 			});
 
@@ -547,18 +628,18 @@ namespace gl_atlas {
 		std::vector<uint32_t> blank(width * height, clear_val);
 		GL_H( glTexImage2D(GL_TEXTURE_2D,
 						   0,
-						   GL_RGBA8,
+						   GL_ATLAS_INTERNAL_TEX_FORMAT,
 						   (GLsizei) width,
 						   (GLsizei) height,
 						   0,
-						   GL_RGBA,
+						   GL_ATLAS_TEX_FORMAT,
 						   GL_UNSIGNED_BYTE,
 						   &blank[0]) );
 	}
 
 
-	static ga_inline void convert_rgb_to_rgba(uint8_t* dest, const uint8_t* src, size_t dim_x,
-									size_t dim_y)
+	static ga_inline void convert_rgb_to_rgba(uint8_t* dest,
+		const uint8_t* src, size_t dim_x, size_t dim_y)
 	{
 		for (size_t y = 0; y < dim_y; ++y) {
 			for (size_t x = 0; x < dim_x; ++x) {
@@ -587,7 +668,7 @@ namespace gl_atlas {
 		dest[3] = (src >> 24) & 0xFF;
 	}
 
-	static ga_inline void swap_rows_rgba(uint8_t* image_data,
+	static ga_inline void flip_rows_rgba(uint8_t* image_data,
 		size_t dim_x, size_t dim_y)
 	{
 		size_t half_dy = dim_y >> 1;
@@ -609,8 +690,7 @@ namespace gl_atlas {
 	// gen
 	//------------------------------------------------------------------------------------
 
-	static ga_inline void gen_atlas_layers(atlas_t& atlas,
-		uint32_t area_accum)
+	static ga_inline void gen_atlas_layers(atlas_t& atlas)
 	{
 		// Basic idea is to keep track of each image
 		// and the layer it belongs to; every image
@@ -635,7 +715,7 @@ namespace gl_atlas {
 			// afterward
 			uint16_t w, h;
 			{
-				gen_layer_bsp placed(atlas, local_fill, area_accum);
+				gen_layer_bsp placed(atlas, local_fill);
 
 				const glm::ivec3& dims = placed.dims();
 
@@ -659,6 +739,39 @@ namespace gl_atlas {
 
 			layer++;
 		}
+
+		gla_logf("Total Images: %lu\nArea Accum: %lu",
+			 atlas.num_images, atlas.area_accum);
+	}
+
+	static ga_inline void push_atlas_image(atlas_t& atlas,
+		uint8_t* buffer, int dx, int dy, int bpp)
+	{
+		std::vector<uint8_t> image_data(dx * dy * DESIRED_BPP, 0);
+
+		if (bpp == 3) {
+			convert_rgb_to_rgba(&image_data[0], buffer, dx, dy);
+		} else if (bpp == DESIRED_BPP) {
+			memcpy(&image_data[0], buffer, dx * dy * DESIRED_BPP);
+		} else {
+			gla_logf("ERROR: received image of would-be index %i" \
+			"that does not contain a supported bytes per pixel count."\
+			" Dimensions: %i x %i. BPP received: %i",
+			(int) atlas.num_images, dx, dy, bpp);
+		}
+
+		atlas.area_accum += dx * dy;
+
+		atlas.dims_x.push_back(dx);
+		atlas.dims_y.push_back(dy);
+
+		// Reverse image rows, since stb_image treats
+		// origin as upper left and OpenGL doesn't.
+		flip_rows_rgba(&image_data[0], dx, dy);
+
+		atlas.buffer_table.push_back(std::move(image_data));
+
+		atlas.num_images++;
 	}
 
 	static ga_inline void make_atlas_from_dir(
@@ -672,8 +785,8 @@ namespace gl_atlas {
 		struct dirent* ent = NULL;
 
 		if (!dir) {
-			logf("Could not open %s", dirpath.c_str());
-			g_running = false;
+			gla_logf("Could not open %s", dirpath.c_str());
+			atlas_error_exit();
 			return;
 		}
 
@@ -681,8 +794,6 @@ namespace gl_atlas {
 			&& "Code is only meant to work with textures using desired bpp of 4!");
 
 		atlas.free_memory();
-
-		size_t area_accum = 0;
 
 		while (!!(ent = readdir(dir))) {
 			std::string filepath(dirpath);
@@ -693,50 +804,28 @@ namespace gl_atlas {
 											 STBI_default);
 
 			if (!stbi_buffer) {
-				logf("Warning: could not open %s. Skipping.", filepath.c_str());
+				gla_logf("Warning: could not open %s. Skipping.", filepath.c_str());
 				continue;
 			}
 
 			if (bpp != DESIRED_BPP && bpp != 3) {
-				logf("Warning: found invalid bpp value of %i for %s. Skipping.",
+				gla_logf("Warning: found invalid bpp value of %i for %s. Skipping.",
 					 bpp, filepath.c_str());
 				continue;
 			}
 
 			atlas.filenames.push_back(std::string(ent->d_name));
 
-			std::vector<uint8_t> image_data(dx * dy * DESIRED_BPP, 0);
-
-			if (bpp != DESIRED_BPP) {
-				convert_rgb_to_rgba(&image_data[0], stbi_buffer, dx, dy);
-			} else {
-				memcpy(&image_data[0], stbi_buffer, dx * dy * DESIRED_BPP);
-			}
+			push_atlas_image(atlas, stbi_buffer, dx, dy, bpp);
 
 			stbi_image_free(stbi_buffer);
-
-			area_accum += dx * dy;
-
-			atlas.dims_x.push_back(dx);
-			atlas.dims_y.push_back(dy);
-
-			// Reverse image rows, since stb_image treats
-			// origin as upper left and OpenGL doesn't.
-			swap_rows_rgba(&image_data[0], dx, dy);
-
-			atlas.buffer_table.push_back(std::move(image_data));
-
-			atlas.num_images++;
 		}
 
 		closedir(dir);
 
-		gen_atlas_layers(atlas, area_accum);
-
-		logf("Total Images: %lu\nArea Accum: %lu",
-			 atlas.num_images, area_accum);
+		gen_atlas_layers(atlas);
 	}
 
-} // namespace gl_atlas
+} // namespace gla
 
 #endif
