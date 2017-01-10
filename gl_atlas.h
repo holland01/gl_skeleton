@@ -431,8 +431,6 @@ namespace gla {
 
 		atlas_type_t& atlas;
 
-		// one for a sorted atlas, the other for an unsorted atlas. The atlas
-		// which takes the least amount of space is the winner
 		node_ptr_t root;
 		glm::ivec3 layer_dims;
 
@@ -441,7 +439,6 @@ namespace gla {
 
 		// The "lines" (expressed implicitly) will only have
 		// positive normals that face either to the right, or upward.
-
 		struct node_t {
 			bool region;
 			int32_t image;
@@ -554,8 +551,6 @@ namespace gla {
 				// set to one of the image's dimension values.
 
 				node->left_child = insert_node(node->left_child, image);
-
-				assert(node->left_child);
 
 				return node;
 			}
